@@ -59,6 +59,17 @@ function weekStates(h) {
   return out;
 }
 
+/* ---------------- leading a Circle ---------------- */
+const LEAD_DAYS = 30; // days of streak or clean time needed before someone can ask to lead a Circle
+function bestRun() {
+  let best = null;
+  S.habits.forEach(h => {
+    const days = h.type === "build" ? streak(h) : cleanDays(h);
+    if (!best || days > best.days) best = { name: h.name, type: h.type, days, private: !!h.private };
+  });
+  return best;
+}
+
 /* ---------------- suggestions ---------------- */
 const AREAS = {
   faith: { label: "Faith", sub: "Bible reading, prayer", habits: [["Read the Bible", "build"], ["Pray for 10 minutes", "build"]] },
@@ -70,7 +81,7 @@ const AREAS = {
 /* ---------------- state ---------------- */
 const S = {
   user: null, account: null, profile: null, isAdmin: false,
-  habits: [], circles: {}, profiles: {}, nudges: [],
+  habits: [], circles: {}, profiles: {}, nudges: [], request: null,
   view: "loading", params: {}, ob: {}, confirming: null,
   subs: [], circleSubs: [],
 };
@@ -121,6 +132,10 @@ function watchMine() {
     S.habits = snap.docs.map(d => ({ id: d.id, ...d.data() })).sort((a, b) => (a.order || 0) - (b.order || 0));
     if (["today", "me"].includes(S.view)) render();
   }));
+  S.subs.push(onSnapshot(doc(db, "circleRequests", uid), snap => {
+    S.request = snap.exists() ? snap.data() : null;
+    if (S.view === "circles") render();
+  }, () => {}));
   S.subs.push(onSnapshot(doc(db, "users", uid), snap => {
     S.account = snap.data() || S.account;
     watchCircles();
@@ -338,6 +353,7 @@ const views = {
     return `<div class="stack-lg"><h1>Circles</h1>
       ${mine.length ? `<section class="stack">${mine.map(c => `<button class="card circle-card" data-act="openCircle" data-cid="${esc(c.id)}"><b>${esc(c.name || "Circle")}</b><span class="small muted">${esc(c.goal || "")}</span><span class="small muted">${(c.members || []).length} members</span></button>`).join("")}</section>` : ""}
       <section class="stack"><h2>Join a Circle</h2><p class="muted small">Ask your Circle leader for the Circle code, or open the invite link they sent you.</p>${joinForm()}</section>
+      <section class="stack"><h2>Lead your own Circle</h2>${leadSection()}</section>
     </div>${nav()}`;
   },
 
@@ -356,6 +372,7 @@ const views = {
       <section class="stack"><div class="row" style="justify-content:space-between"><h2>Members</h2><span class="small muted">${ms.filter(m => m.lastCheckIn === T()).length} of ${ms.length} checked in today</span></div>
         <div class="members">${ms.map(m => `<button class="member" data-act="pickMember" data-uid="${esc(m.uid)}">${avatar(S.profiles[m.uid]).replace('class="av ', `class="av ${m.lastCheckIn === T() ? "done" : ""} `)}<span>${esc((S.profiles[m.uid] || {}).nickname || "Member")}${m.uid === me ? " (you)" : ""}</span></button>`).join("")}</div>
         ${selM ? memberPanel(c, selM, isLead) : ""}</section>
+      ${c.leaderUid === me && (ms.find(m => m.uid === me) || {}).code ? invitePanel(ms.find(m => m.uid === me).code, c.id) : ""}
       <section class="stack"><h2>Write to your Circle</h2>
         <div class="card stack"><textarea id="postText" maxlength="1000" placeholder="Share a struggle, a win, a prayer request or some encouragement."></textarea>
           <button class="btn" data-act="post">Post</button><div id="careSlot2"></div></div></section>
@@ -384,7 +401,16 @@ const views = {
   admin: () => {
     const list = S.params.list || [];
     const base = location.origin + location.pathname;
+    const reqs = (S.params.requests || []).filter(r => r.status === "pending");
     return `<div class="stack-lg"><h1>Admin</h1>
+      <section class="stack"><h2>Requests to lead a Circle</h2>${reqs.length ? reqs.map(r => `<div class="card stack">
+          <div class="row">${avatar(S.profiles[r.uid])}<div><b>${esc((S.profiles[r.uid] || {}).nickname || "Member")}</b><p class="small muted">Asked ${ago(tsOf(r.createdAt))}</p></div></div>
+          <div class="chips"><span class="chip ok">${esc(r.habitName)} · ${r.days} ${r.habitType === "quit" ? "days clean" : "day streak"}</span></div>
+          <div><p class="label">Circle</p><b>${esc(r.name)}</b><p class="small muted">${esc(r.goal)} · ${esc((AREAS[r.kind] || {}).label || "")}</p></div>
+          <div><p class="label">Why they want to lead</p><p class="post-text">${esc(r.why)}</p></div>
+          <div class="field"><label for="note_${esc(r.uid)}" class="small">Note to them (optional, shown if you decline)</label><input type="text" id="note_${esc(r.uid)}" maxlength="200"></div>
+          <div class="row"><button class="btn small" data-act="approveReq" data-uid="${esc(r.uid)}">Approve</button><button class="btn small ghost" data-act="declineReq" data-uid="${esc(r.uid)}">Decline</button></div>
+        </div>`).join("") : `<div class="empty">No requests waiting.</div>`}</section>
       <section class="stack"><h2>Create a Circle</h2><div class="card stack">
         <div class="field"><label for="cName">Name</label><input type="text" id="cName" maxlength="40" placeholder="For example: Bible in a Year"></div>
         <div class="field"><label for="cGoal">Daily goal</label><input type="text" id="cGoal" maxlength="100" placeholder="For example: Read one chapter every day"></div>
@@ -402,6 +428,36 @@ const views = {
 function joinForm() {
   return `<div class="card stack"><div class="field"><label for="joinCode">Circle code</label><input type="text" id="joinCode" maxlength="40" placeholder="For example: BIBLE-7K2Q" autocomplete="off" autocapitalize="characters"></div>
     <p class="err" id="codeErr" hidden></p><button class="btn" data-act="lookupCode">Find Circle</button></div>`;
+}
+function leadSection() {
+  const r = S.request;
+  if (r && r.status === "pending") return `<div class="card stack"><b>Your request is waiting for approval</b><p class="small muted">You asked to lead <b>${esc(r.name)}</b>. The Circles team will look at it soon.</p><button class="link" data-act="cancelReq">Withdraw my request</button></div>`;
+  if (r && r.status === "approved") {
+    const joined = (S.account.circles || []).includes(r.cid);
+    return `<div class="card stack"><b>Your Circle has been approved</b><p class="small muted">You are the leader of <b>${esc(r.name)}</b>. Open it to get your invite link.</p>
+      <button class="btn" data-act="${joined ? "openCircle" : "openApproved"}" data-cid="${esc(r.cid)}">Open my Circle</button></div>`;
+  }
+  const best = bestRun(), days = best ? best.days : 0;
+  const declined = r && r.status === "declined" ? `<div class="soft small"><b>Your last request was not approved.</b>${r.note ? " Note from the Circles team: " + esc(r.note) : ""} You can ask again.</div>` : "";
+  if (days < LEAD_DAYS) {
+    return `${declined}<div class="card stack"><p>You can ask to lead a Circle once you have a <b>${LEAD_DAYS} day streak</b> on a habit you are building, or <b>${LEAD_DAYS} days clean</b> from a habit you are quitting. That way, every leader has walked the road themselves.</p>
+      <div class="row" style="flex-wrap:nowrap"><div class="bar" style="flex:1"><i style="width:${Math.min(100, days / LEAD_DAYS * 100)}%"></i></div><b>${days} of ${LEAD_DAYS}</b></div>
+      <p class="small muted">${best ? `Your best right now: ${esc(best.name)}, ${days} ${best.type === "quit" ? "days clean" : "day streak"}. ${LEAD_DAYS - days} more to go.` : "Add a habit on the Me page to get started."}</p></div>`;
+  }
+  return `${declined}<div class="card stack"><p><b>You qualify to lead a Circle.</b> ${esc(best.name)}: ${days} ${best.type === "quit" ? "days clean" : "day streak"}.</p>
+    <p class="small muted">Tell us about the Circle you want to lead. The Circles team will review your request before the Circle is created.${best.private ? " Because this habit is private, the Circles team will only see that it is a private habit and how many days you have kept it, not its name." : ""}</p>
+    <div class="field"><label for="rName">Circle name</label><input type="text" id="rName" maxlength="40" placeholder="For example: Free Together"></div>
+    <div class="field"><label for="rGoal">Daily goal</label><input type="text" id="rGoal" maxlength="100" placeholder="For example: Stay clean today and check in every evening"></div>
+    <div class="field"><label for="rKind">Type</label><select id="rKind">${Object.entries(AREAS).map(([k, a]) => `<option value="${k}" ${best.type === "quit" && k === "free" ? "selected" : ""}>${a.label}</option>`).join("")}</select></div>
+    <div class="field"><label for="rWhy">Why do you want to lead this Circle?</label><textarea id="rWhy" maxlength="600" placeholder="Share a little of your journey and how you want to help others."></textarea></div>
+    <p class="err" id="reqErr" hidden></p>
+    <button class="btn" data-act="sendReq">Send request</button></div>`;
+}
+function invitePanel(code, cid) {
+  const link = location.origin + location.pathname + "?join=" + cid + "&code=" + code;
+  return `<section class="stack"><h2>Invite people</h2><div class="card stack"><p class="small muted">As the leader, share this link or code with the people you want in this Circle.</p>
+    <span class="small">Circle code: <b>${esc(code)}</b></span><div class="copy">${esc(link)}</div>
+    <button class="btn small ghost" data-act="copyLink" data-link="${esc(link)}">Copy invite link</button></div></section>`;
 }
 function habitCard(h) {
   const conf = S.confirming === "slip" + h.id;
@@ -448,7 +504,7 @@ function postCard(c, p, isLead) {
 function render() {
   const v = views[S.view] || views.loading;
   const active = document.activeElement, keepId = active && active.id, keepVal = active && "value" in active ? active.value : null;
-  const drafts = {}; ["checkText", "postText", "joinCode", "newH", "customH", "cName", "cGoal"].forEach(id => { const el = document.getElementById(id); if (el && el.value) drafts[id] = el.value; });
+  const drafts = {}; ["checkText", "postText", "joinCode", "newH", "customH", "cName", "cGoal", "rName", "rGoal", "rWhy"].forEach(id => { const el = document.getElementById(id); if (el && el.value) drafts[id] = el.value; });
   $app.innerHTML = v();
   Object.entries(drafts).forEach(([id, val]) => { const el = document.getElementById(id); if (el && !el.value) el.value = val; });
   if (keepId) { const el = document.getElementById(keepId); if (el) { if (keepVal !== null && "value" in el) el.value = keepVal; el.focus(); } }
@@ -624,6 +680,43 @@ const actions = {
     catch (e) { toast("Could not leave. Please try again."); }
   },
 
+  async sendReq() {
+    const name = document.getElementById("rName").value.trim(), goal = document.getElementById("rGoal").value.trim();
+    const kind = document.getElementById("rKind").value, why = document.getElementById("rWhy").value.trim(), err = document.getElementById("reqErr");
+    if (!name || !goal || why.length < 20) { err.textContent = "Please fill in the name and goal, and write a few sentences about why you want to lead."; err.hidden = false; return; }
+    const best = bestRun();
+    if (!best || best.days < LEAD_DAYS) return toast("You do not qualify yet.");
+    try {
+      await setDoc(doc(db, "circleRequests", S.user.uid), { uid: S.user.uid, name, goal, kind, why, habitName: best.private ? "A private habit" : best.name, habitType: best.type, days: best.days, status: "pending", createdAt: serverTimestamp() });
+      toast("Request sent to the Circles team");
+    } catch (e) { console.error(e); toast("Could not send your request. Please try again."); }
+  },
+  async cancelReq() { try { await deleteDoc(doc(db, "circleRequests", S.user.uid)); } catch (e) { toast("Could not withdraw. Please try again."); } },
+  async openApproved(el) {
+    const r = S.request;
+    try {
+      await setDoc(doc(db, "circles", r.cid, "members", S.user.uid), { promise: true, code: r.code, joinedAt: serverTimestamp(), summary: summaryFor(), lastCheckIn: "" });
+      await updateDoc(doc(db, "users", S.user.uid), { circles: arrayUnion(r.cid) });
+      S.account.circles = [...new Set([...(S.account.circles || []), r.cid])]; watchCircles();
+      go("circle", { cid: r.cid });
+    } catch (e) { console.error(e); toast("Could not open your Circle. Please try again."); }
+  },
+  async approveReq(el) {
+    const r = (S.params.requests || []).find(x => x.uid === el.dataset.uid); if (!r) return;
+    const code = (r.name.replace(/[^A-Za-z]/g, "").slice(0, 5) || "CIRCL").toUpperCase() + "-" + Math.random().toString(36).slice(2, 6).toUpperCase();
+    const id = "c" + Date.now().toString(36);
+    try {
+      await setDoc(doc(db, "circles", id), { name: r.name, goal: r.goal, kind: r.kind, leaderUid: r.uid, createdAt: serverTimestamp() });
+      await setDoc(doc(db, "joinCodes", code), { cid: id, createdAt: serverTimestamp() });
+      await updateDoc(doc(db, "circleRequests", r.uid), { status: "approved", cid: id, code, decidedAt: serverTimestamp() });
+      toast("Approved. Their Circle is ready."); loadAdmin();
+    } catch (e) { console.error(e); toast("Could not approve. Please try again."); }
+  },
+  async declineReq(el) {
+    const note = (document.getElementById("note_" + el.dataset.uid) || {}).value || "";
+    try { await updateDoc(doc(db, "circleRequests", el.dataset.uid), { status: "declined", note: note.trim(), decidedAt: serverTimestamp() }); toast("Request declined"); loadAdmin(); }
+    catch (e) { toast("Could not decline. Please try again."); }
+  },
   async createCircle() {
     const name = document.getElementById("cName").value.trim(), goal = document.getElementById("cGoal").value.trim(), kind = document.getElementById("cKind").value;
     if (!name) return toast("Please give the Circle a name.");
@@ -647,10 +740,12 @@ function careCard() {
 }
 async function loadAdmin() {
   try {
-    const [snap, codes] = await Promise.all([getDocs(collection(db, "circles")), getDocs(collection(db, "joinCodes"))]);
+    const [snap, codes, reqs] = await Promise.all([getDocs(collection(db, "circles")), getDocs(collection(db, "joinCodes")), getDocs(collection(db, "circleRequests"))]);
+    const requests = reqs.docs.map(d => ({ ...d.data({ serverTimestamps: "estimate" }), uid: d.id }));
+    await loadProfiles(requests.map(r => r.uid));
     const byCid = {}; codes.docs.forEach(d => { byCid[d.data().cid] = d.id; });
     const list = snap.docs.map(d => ({ id: d.id, ...d.data(), code: byCid[d.id] || "" }));
-    if (S.view === "admin") { S.params.list = list; render(); }
+    if (S.view === "admin") { S.params.list = list; S.params.requests = requests; render(); }
   } catch (e) { toast("Could not load Circles."); }
 }
 
