@@ -30,10 +30,19 @@ function toast(msg) {
   t.textContent = msg; t.hidden = false;
   clearTimeout(toast._t); toast._t = setTimeout(() => (t.hidden = true), 2600);
 }
-function avatar(p, size = "") {
+function avatar(p, size = "", photo) {
   const name = (p && p.nickname) || "?";
   const color = (p && p.color) || COLORS[7];
+  const src = photo || (p && p.photo);
+  if (src && /^data:image\/(jpeg|png|webp);base64,/.test(src)) return `<img class="av ${size}" src="${src}" alt="" style="background:${esc(color)};object-fit:cover">`;
   return `<span class="av ${size}" style="background:${esc(color)}" aria-hidden="true">${esc(name.trim().charAt(0).toUpperCase())}</span>`;
+}
+const TAGS = ["Mentor", "Certified Leader"];
+function tagsFor(uid, circle) {
+  const p = S.profiles[uid] || {}, out = [];
+  if (circle && circle.leaderUid === uid) out.push('<span class="tag lead">Circle Leader</span>');
+  (p.tags || []).forEach(t => out.push(`<span class="tag badge">${esc(t)}</span>`));
+  return out.join("");
 }
 function ago(ts) {
   if (!ts) return "just now";
@@ -128,8 +137,11 @@ function go(view, params = {}) {
 async function loadProfiles(ids) {
   const need = [...new Set(ids)].filter(id => id && !S.profiles[id]);
   await Promise.all(need.map(async id => {
-    try { const s = await getDoc(doc(db, "profiles", id)); S.profiles[id] = s.exists() ? s.data() : { nickname: "Member" }; }
-    catch (e) { S.profiles[id] = { nickname: "Member" }; }
+    try {
+      const [s, b] = await Promise.all([getDoc(doc(db, "profiles", id)), getDoc(doc(db, "badges", id)).catch(() => null)]);
+      S.profiles[id] = { ...(s.exists() ? s.data() : { nickname: "Member" }), tags: b && b.exists() ? b.data().tags || [] : [] };
+    }
+    catch (e) { S.profiles[id] = { nickname: "Member", tags: [] }; }
   }));
 }
 function stopSubs(list) { list.forEach(u => { try { u(); } catch (e) {} }); list.length = 0; }
@@ -144,7 +156,7 @@ async function startSession(user) {
   S.account = acc.exists() ? acc.data() : null;
   S.profile = prof.exists() ? prof.data() : null;
   S.isAdmin = !!(adm && adm.exists());
-  if (S.profile) S.profiles[user.uid] = S.profile;
+  if (S.profile) { S.profiles[user.uid] = S.profile; try { const b = await getDoc(doc(db, "badges", user.uid)); S.profile.tags = b.exists() ? b.data().tags || [] : []; } catch (e) {} }
 
   if (!S.account || !S.account.adult) return go("ob-age");
   if (!S.profile) return go("ob-name");
@@ -437,7 +449,19 @@ const views = {
 
   me: () => {
     const p = S.profile || {};
-    return `<div class="stack-lg"><div class="row">${avatar(p, "lg")}<div><h1>${esc(p.nickname)}</h1><p class="small muted">Private: ${esc(S.account.realName || "")}, ${esc(S.user.email || "")}</p></div></div>
+    const a = S.account, draft = S.ob.prof || {};
+    const photo = draft.photo !== undefined ? draft.photo : (a.photo || "");
+    const vis = (k, cur) => `<div class="choices"><label class="choice"><input type="radio" name="${k}" value="public" ${cur ? "checked" : ""}><b>My Circles and buddies</b><small>Everyone in your Circles can see it</small></label><label class="choice"><input type="radio" name="${k}" value="private" ${cur ? "" : "checked"}><b>Only when I share my real name</b><small>Only buddies you reveal yourself to</small></label></div>`;
+    return `<div class="stack-lg"><div class="row">${avatar(p, "lg", a.photo)}<div><h1>${esc(p.nickname)}</h1>${tagsFor(S.user.uid)}${a.profession ? `<p class="small">${esc(a.profession)}</p>` : ""}<p class="small muted">Private: ${esc(a.realName || "")}, ${esc(S.user.email || "")}</p></div></div>
+      <section class="stack"><h2>Your profile</h2><div class="card stack">
+        <div class="field"><label for="pNick">Nickname</label><input type="text" id="pNick" maxlength="24" value="${esc(p.nickname || "")}"></div>
+        <div class="field"><label>Profile photo (optional)</label>
+          <div class="row">${avatar(p, "lg", photo)}<div class="stack" style="gap:6px"><label class="btn small ghost" for="pPhoto" style="cursor:pointer">${photo ? "Change photo" : "Add a photo"}</label><input type="file" id="pPhoto" accept="image/*" data-act="pickPhoto" hidden>${photo ? `<button class="link" data-act="removePhoto">Remove photo</button>` : ""}</div></div>
+          <p class="small muted">If you want to stay anonymous in your Circles, choose a picture that is not your face, or keep it private below.</p>
+          ${vis("pPhotoVis", a.photoPublic)}</div>
+        <div class="field"><label for="pJob">Profession (optional)</label><input type="text" id="pJob" maxlength="60" value="${esc(a.profession || "")}" placeholder="For example: Teacher, Software engineer, Student">
+          ${vis("pJobVis", a.professionPublic)}</div>
+        <button class="btn" data-act="saveProfile">Save profile</button></div></section>
       <section class="stack"><h2>Your habits</h2>${S.habits.map(h => `<div class="card habit"><div><div class="hname">${esc(h.name)}<span class="tag ${h.type}">${h.type === "build" ? "Build" : "Quit"}</span>${h.private ? '<span class="tag priv">Private</span>' : ""}</div></div>
           <div class="hactions"><button class="link" data-act="togglePriv" data-id="${esc(h.id)}">${h.private ? "Share with my Circles" : "Make private"}</button><button class="link" data-act="delAsk" data-id="${esc(h.id)}">Remove</button></div>
           ${S.confirming === "del" + h.id ? `<div class="confirm">Remove this habit and all its history?<button class="btn small danger" data-act="delHabit" data-id="${esc(h.id)}">Remove</button><button class="btn small ghost" data-act="cancel">Keep it</button></div>` : ""}</div>`).join("")}
@@ -466,7 +490,7 @@ const views = {
       <section class="stack"><h2>Your buddies</h2>${S.buddies.length ? S.buddies.map(b => {
         const o = otherOf(b), p = S.profiles[o] || {}, sm = b["s_" + o], today = sm && sm.date === T() ? sm.shared || [] : [];
         const builds = today.filter(h => h.type === "build");
-        return `<button class="card circle-card" data-act="openBuddy" data-pid="${esc(b.id)}"><div class="row">${avatar(p)}<div><b>${esc(p.nickname || "Buddy")}</b>${b["n_" + o] ? ` <span class="small muted">(${esc(b["n_" + o])})</span>` : ""}${unread(b) ? ' <span class="tag lead">New message</span>' : ""}
+        return `<button class="card circle-card" data-act="openBuddy" data-pid="${esc(b.id)}"><div class="row">${avatar(p, "", b["p_" + o])}<div><b>${esc(p.nickname || "Buddy")}</b>${b["n_" + o] ? ` <span class="small muted">(${esc(b["n_" + o])})</span>` : ""}${unread(b) ? ' <span class="tag lead">New message</span>' : ""}${tagsFor(o)}
           <p class="small muted">${builds.length ? builds.filter(h => h.done).length + " of " + builds.length + " habits done today" : "No shared habits ticked today"}</p></div></div></button>`;
       }).join("") : `<div class="empty">No buddies yet. Invite a friend below, or tap someone in your Circle and choose Ask to be buddies.</div>`}</section>
       ${S.buddyOut.length ? `<section class="stack"><h2>Waiting for them to accept</h2>${S.buddyOut.map(r => `<div class="card row" style="justify-content:space-between"><div class="row">${avatar(S.profiles[r.to], "sm")}<b>${esc((S.profiles[r.to] || {}).nickname || "Member")}</b></div><button class="link" data-act="cancelBuddyReq" data-to="${esc(r.to)}">Cancel</button></div>`).join("")}</section>` : ""}
@@ -492,7 +516,7 @@ const views = {
     const theirName = b["n_" + o], myShared = b["n_" + me];
     return `<div class="stack-lg">
       <div class="stack"><button class="back" data-act="nav" data-v="friends">‹ Friends</button>
-        <div class="row">${avatar(p, "lg")}<div><h1>${esc(p.nickname || "Buddy")}</h1>${theirName ? `<p class="small">Real name: <b>${esc(theirName)}</b></p>` : `<p class="small muted">Real name not shared</p>`}</div></div></div>
+        <div class="row">${avatar(p, "lg", b["p_" + o])}<div><h1>${esc(p.nickname || "Buddy")}</h1>${tagsFor(o)}${theirName ? `<p class="small">Real name: <b>${esc(theirName)}</b></p>` : `<p class="small muted">Real name not shared</p>`}${(b["j_" + o] || p.profession) ? `<p class="small">${esc(b["j_" + o] || p.profession)}</p>` : ""}</div></div></div>
       <section class="stack"><h2>Their habits today</h2>${today.length ? `<div class="chips">${today.map(h => h.type === "build" ? `<span class="chip ${h.done ? "ok" : ""}">${esc(h.name)}${h.done ? " · done" : ""}</span>` : `<span class="chip">${esc(h.name)} · ${h.clean} days clean</span>`).join("")}</div>` : `<p class="small muted">They have not shared any habits.</p>`}
         <div class="row"><button class="btn small warm" data-act="buddyMsg" data-kind="cheer">Cheer them on</button><button class="btn small ghost" data-act="buddyMsg" data-kind="nudge">Send a nudge</button></div></section>
       <section class="stack"><h2>Chat</h2>
@@ -500,7 +524,7 @@ const views = {
         <div class="card stack"><textarea id="chatText" maxlength="1000" placeholder="Write a message"></textarea><button class="btn" data-act="buddyMsg" data-kind="text">Send</button></div></section>
       <section class="stack"><h2>Real names</h2><div class="card stack">
         ${myShared ? `<p class="small">They can see your real name: <b>${esc(myShared)}</b></p><button class="link" data-act="hideName">Hide my real name from them</button>`
-          : (S.confirming === "reveal" ? `<div class="confirm" style="flex-direction:column;align-items:stretch"><b>Share your real name with ${esc(p.nickname)}?</b><span>They will see <b>${esc(S.account.realName || "your name")}</b>. You can hide it again later, but they may remember it.</span><div class="row"><button class="btn small" data-act="revealName">Yes, share it</button><button class="btn small ghost" data-act="cancel">Cancel</button></div></div>`
+          : (S.confirming === "reveal" ? `<div class="confirm" style="flex-direction:column;align-items:stretch"><b>Share your real name with ${esc(p.nickname)}?</b><span>They will see <b>${esc(S.account.realName || "your name")}</b>${S.account.photo ? ", your profile photo" : ""}${S.account.profession ? " and your profession" : ""}. You can hide it again later, but they may remember it.</span><div class="row"><button class="btn small" data-act="revealName">Yes, share it</button><button class="btn small ghost" data-act="cancel">Cancel</button></div></div>`
           : `<p class="small muted">Your real name is private. Share it only if you want to.</p><button class="btn small ghost" data-act="revealAsk">Share my real name</button>`)}
         ${theirName ? "" : `<button class="link" data-act="buddyMsg" data-kind="reveal-ask">Ask them to share their real name</button>`}
       </div></section>
@@ -522,6 +546,14 @@ const views = {
           <div class="field"><label for="note_${esc(r.uid)}" class="small">Note to them (optional, shown if you decline)</label><input type="text" id="note_${esc(r.uid)}" maxlength="200"></div>
           <div class="row"><button class="btn small" data-act="approveReq" data-uid="${esc(r.uid)}">Approve</button><button class="btn small ghost" data-act="declineReq" data-uid="${esc(r.uid)}">Decline</button></div>
         </div>`).join("") : `<div class="empty">No requests waiting.</div>`}</section>
+      <section class="stack"><h2>People and tags</h2><div class="card stack">
+        <p class="small muted">Give certified leaders and mentors a tag that shows under their name everywhere in Circles. You can also remove a profile photo that breaks the Circle promise.</p>
+        ${S.params.people ? `<input type="text" id="peopleFilter" placeholder="Search by nickname" data-act="filterPeople">
+          <div class="stack" id="peopleList">${S.params.people.filter(uid => !S.params.pf || ((S.profiles[uid] || {}).nickname || "").toLowerCase().includes(S.params.pf)).map(uid => { const pp = S.profiles[uid] || {}; return `<div class="row" style="justify-content:space-between;border-top:1px solid var(--line);padding-top:10px">
+            <div class="row">${avatar(pp, "sm")}<div><b>${esc(pp.nickname || "Member")}</b>${tagsFor(uid)}</div></div>
+            <div class="row">${TAGS.map(t => `<button class="btn small ${(pp.tags || []).includes(t) ? "" : "ghost"}" data-act="toggleTag" data-uid="${esc(uid)}" data-tag="${esc(t)}">${(pp.tags || []).includes(t) ? "✓ " : ""}${esc(t)}</button>`).join("")}${pp.photo ? `<button class="link" data-act="adminRemovePhoto" data-uid="${esc(uid)}">Remove photo</button>` : ""}</div></div>`; }).join("")}</div>`
+          : `<button class="btn small ghost" data-act="loadPeople">Show everyone</button>`}
+      </div></section>
       <section class="stack"><h2>Create a Circle</h2><div class="card stack">
         <div class="field"><label for="cName">Name</label><input type="text" id="cName" maxlength="40" placeholder="For example: Bible in a Year"></div>
         <div class="field"><label for="cGoal">Daily goal</label><input type="text" id="cGoal" maxlength="100" placeholder="For example: Read one chapter every day"></div>
@@ -539,6 +571,19 @@ const views = {
 function joinForm() {
   return `<div class="card stack"><div class="field"><label for="joinCode">Circle code</label><input type="text" id="joinCode" maxlength="40" placeholder="For example: BIBLE-7K2Q" autocomplete="off" autocapitalize="characters"></div>
     <p class="err" id="codeErr" hidden></p><button class="btn" data-act="lookupCode">Find Circle</button></div>`;
+}
+function resizeImage(file, size = 192) {
+  return new Promise((resolve, reject) => {
+    const img = new Image(), url = URL.createObjectURL(file);
+    img.onload = () => {
+      const c = document.createElement("canvas"); c.width = c.height = size;
+      const s = Math.min(img.width, img.height), sx = (img.width - s) / 2, sy = (img.height - s) / 2;
+      c.getContext("2d").drawImage(img, sx, sy, s, s, 0, 0, size, size);
+      URL.revokeObjectURL(url); resolve(c.toDataURL("image/jpeg", 0.82));
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("bad image")); };
+    img.src = url;
+  });
 }
 function unread(b) { const o = otherOf(b); return (b["a_" + o] || 0) > (b["r_" + S.user.uid] || 0); }
 function buddyButton(uid) {
@@ -638,7 +683,7 @@ function habitCard(h) {
 function memberPanel(c, m, isLead) {
   const p = S.profiles[m.uid] || {}, me = m.uid === S.user.uid;
   const sum = (m.summary && m.summary.date === T()) ? m.summary.shared || [] : (m.summary ? (m.summary.shared || []).map(h => ({ ...h, done: false })) : []);
-  return `<div class="card stack"><div class="row">${avatar(p)}<div><b>${esc(p.nickname || "Member")}</b>${c.leaderUid === m.uid ? '<span class="tag lead">Leader</span>' : ""}<p class="small muted">${m.lastCheckIn === T() ? "Checked in today" : "Not checked in yet today"}</p></div></div>
+  return `<div class="card stack"><div class="row">${avatar(p)}<div><b>${esc(p.nickname || "Member")}</b>${tagsFor(m.uid, c)}${p.profession ? `<p class="small">${esc(p.profession)}</p>` : ""}<p class="small muted">${m.lastCheckIn === T() ? "Checked in today" : "Not checked in yet today"}</p></div></div>
     ${sum.length ? `<div class="chips">${sum.map(h => h.type === "build" ? `<span class="chip ${h.done ? "ok" : ""}">${esc(h.name)}${h.done ? " · done" : ""}</span>` : `<span class="chip">${esc(h.name)} · ${h.clean} days clean</span>`).join("")}</div>` : `<p class="small muted">No shared habits.</p>`}
     ${me ? "" : `<div class="row"><button class="btn small warm" data-act="nudge" data-kind="cheer" data-uid="${esc(m.uid)}">Cheer them on</button><button class="btn small ghost" data-act="nudge" data-kind="nudge" data-uid="${esc(m.uid)}">Send a nudge</button></div>${buddyButton(m.uid)}`}
     ${isLead && !me ? `<div class="row">${S.isAdmin && c.leaderUid !== m.uid ? `<button class="link" data-act="makeLeader" data-uid="${esc(m.uid)}">Make leader</button>` : ""}<button class="link" data-act="removeAsk" data-uid="${esc(m.uid)}">Remove from Circle</button></div>
@@ -648,7 +693,7 @@ function postCard(c, p, isLead) {
   const prof = S.profiles[p.uid] || {}, me = S.user.uid;
   const cheers = Object.keys(p.cheers || {}), mine = !!(p.cheers || {})[me];
   return `<article class="card post ${p.kind === "checkin" ? "checkin" : ""} ${p.care && isLead ? "care" : ""}">
-    <div class="post-head">${avatar(prof)}<div><b>${esc(prof.nickname || "Member")}</b>${c.leaderUid === p.uid ? '<span class="tag lead">Leader</span>' : ""}<p class="small muted">${p.kind === "checkin" ? "Daily check in · " : ""}${ago(tsOf(p.createdAt))}</p></div></div>
+    <div class="post-head">${avatar(prof)}<div><b>${esc(prof.nickname || "Member")}</b>${tagsFor(p.uid, c)}<p class="small muted">${p.kind === "checkin" ? "Daily check in · " : ""}${ago(tsOf(p.createdAt))}</p></div></div>
     ${p.hidden ? `<p class="small muted">Hidden by the Circle leader. Only leaders can see this.</p>` : ""}
     ${p.care && isLead ? `<p class="small" style="color:var(--warm)"><b>This person may need care.</b> Please reach out to them gently.</p>` : ""}
     ${p.text ? `<p class="post-text">${esc(p.text)}</p>` : ""}
@@ -665,7 +710,7 @@ function postCard(c, p, isLead) {
 function render() {
   const v = views[S.view] || views.loading;
   const active = document.activeElement, keepId = active && active.id, keepVal = active && "value" in active ? active.value : null;
-  const drafts = {}; ["checkText", "postText", "joinCode", "newH", "customH", "cName", "cGoal", "rName", "rGoal", "rWhy", "chatText"].forEach(id => { const el = document.getElementById(id); if (el && el.value) drafts[id] = el.value; });
+  const drafts = {}; ["checkText", "postText", "joinCode", "newH", "customH", "cName", "cGoal", "rName", "rGoal", "rWhy", "chatText", "pNick", "pJob"].forEach(id => { const el = document.getElementById(id); if (el && el.value) drafts[id] = el.value; });
   $app.innerHTML = v();
   Object.entries(drafts).forEach(([id, val]) => { const el = document.getElementById(id); if (el && !el.value) el.value = val; });
   if (keepId) { const el = document.getElementById(keepId); if (el) { if (keepVal !== null && "value" in el) el.value = keepVal; el.focus(); } }
@@ -853,6 +898,50 @@ const actions = {
     catch (e) { toast("Could not leave. Please try again."); }
   },
 
+  async pickPhoto(el) {
+    const f = el.files && el.files[0]; if (!f) return;
+    if (!f.type.startsWith("image/")) return toast("Please choose a picture.");
+    try { S.ob.prof = { ...(S.ob.prof || {}), photo: await resizeImage(f) }; render(); } catch (e) { toast("That picture could not be used. Please try another."); }
+  },
+  removePhoto() { S.ob.prof = { ...(S.ob.prof || {}), photo: "" }; render(); },
+  async saveProfile() {
+    const nick = document.getElementById("pNick").value.trim(), job = document.getElementById("pJob").value.trim();
+    if (nick.length < 2) return toast("Please choose a nickname with at least 2 letters.");
+    const photo = S.ob.prof && S.ob.prof.photo !== undefined ? S.ob.prof.photo : (S.account.photo || "");
+    const photoPublic = document.querySelector('input[name="pPhotoVis"]:checked').value === "public";
+    const professionPublic = document.querySelector('input[name="pJobVis"]:checked').value === "public";
+    const prof = { nickname: nick, color: (S.profile && S.profile.color) || COLORS[0], updatedAt: serverTimestamp() };
+    if (photo && photoPublic) prof.photo = photo;
+    if (job && professionPublic) prof.profession = job;
+    try {
+      await setDoc(doc(db, "profiles", S.user.uid), prof);
+      await updateDoc(doc(db, "users", S.user.uid), { photo, profession: job, photoPublic, professionPublic });
+      Object.assign(S.account, { photo, profession: job, photoPublic, professionPublic });
+      S.profile = { ...prof, tags: (S.profile || {}).tags || [] }; S.profiles[S.user.uid] = S.profile; S.ob.prof = null;
+      for (const b of S.buddies) {
+        if (!b["n_" + S.user.uid]) continue;
+        try { await updateDoc(doc(db, "buddies", b.id), { ["p_" + S.user.uid]: photo || deleteField(), ["j_" + S.user.uid]: job || deleteField() }); } catch (e) {}
+      }
+      toast("Profile saved"); render();
+    } catch (e) { console.error(e); toast("Could not save your profile. The photo may be too large."); }
+  },
+  async loadPeople() {
+    try {
+      const snap = await getDocs(collection(db, "profiles"));
+      await loadProfiles(snap.docs.map(d => d.id));
+      S.params.people = snap.docs.map(d => d.id); render();
+    } catch (e) { toast("Could not load people."); }
+  },
+  async toggleTag(el) {
+    const uid = el.dataset.uid, tag = el.dataset.tag, p = S.profiles[uid] || {};
+    const tags = (p.tags || []).includes(tag) ? p.tags.filter(t => t !== tag) : [...(p.tags || []), tag];
+    try { await setDoc(doc(db, "badges", uid), { tags, updatedAt: serverTimestamp() }); p.tags = tags; render(); toast("Tags updated"); }
+    catch (e) { toast("Could not update tags."); }
+  },
+  async adminRemovePhoto(el) {
+    try { await updateDoc(doc(db, "profiles", el.dataset.uid), { photo: deleteField() }); delete (S.profiles[el.dataset.uid] || {}).photo; render(); toast("Photo removed"); }
+    catch (e) { toast("Could not remove the photo."); }
+  },
   openBuddy(el) { go("buddy", { pid: el.dataset.pid }); },
   async makeInvite() {
     const token = Math.random().toString(36).slice(2, 8) + Math.random().toString(36).slice(2, 8);
@@ -897,10 +986,13 @@ const actions = {
   },
   revealAsk() { S.confirming = "reveal"; render(); },
   async revealName() {
-    try { await updateDoc(doc(db, "buddies", S.params.pid), { ["n_" + S.user.uid]: S.account.realName || S.user.displayName || "" }); S.confirming = null; toast("Your real name is now shared with them"); }
+    const u = S.user.uid, upd = { ["n_" + u]: S.account.realName || S.user.displayName || "" };
+    if (S.account.photo) upd["p_" + u] = S.account.photo;
+    if (S.account.profession) upd["j_" + u] = S.account.profession;
+    try { await updateDoc(doc(db, "buddies", S.params.pid), upd); S.confirming = null; toast("Your real name is now shared with them"); }
     catch (e) { toast("Could not share. Please try again."); }
   },
-  async hideName() { try { await updateDoc(doc(db, "buddies", S.params.pid), { ["n_" + S.user.uid]: deleteField() }); toast("Your real name is hidden again"); } catch (e) {} },
+  async hideName() { const u = S.user.uid; try { await updateDoc(doc(db, "buddies", S.params.pid), { ["n_" + u]: deleteField(), ["p_" + u]: deleteField(), ["j_" + u]: deleteField() }); toast("Your real name is hidden again"); } catch (e) {} },
   unbuddyAsk() { S.confirming = "unbuddy"; render(); },
   async unbuddy() { try { await deleteDoc(doc(db, "buddies", S.params.pid)); go("friends"); } catch (e) { toast("Could not remove. Please try again."); } },
   async setPlan() {
@@ -996,7 +1088,11 @@ document.addEventListener("click", e => {
   const el = e.target.closest("[data-act]"); if (!el) return;
   const a = actions[el.dataset.act]; if (!a) return;
   if (el.tagName === "INPUT") { if (el.type === "checkbox") a(el); return; }
+  if (el.tagName === "LABEL") return;
   e.preventDefault(); a(el);
+});
+document.addEventListener("input", e => {
+  if (e.target.id === "peopleFilter") { S.params.pf = e.target.value.trim().toLowerCase(); render(); }
 });
 document.addEventListener("change", e => {
   const el = e.target.closest("[data-act]"); if (!el || el.tagName !== "INPUT" || el.type === "checkbox") return;

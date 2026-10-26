@@ -138,3 +138,5 @@ nav.tabs button.on{color:var(--accent)}
 details summary{cursor:pointer;padding:4px 0}
 details[open] summary{margin-bottom:8px}
 a.btn{text-decoration:none}
+.tag.badge{background:color-mix(in srgb,var(--warm) 18%,transparent);color:var(--warm)}
+img.av{display:block}

@@ -33,7 +33,11 @@ service cloud.firestore {
         && request.resource.data.nickname is string
         && request.resource.data.nickname.size() >= 2
         && request.resource.data.nickname.size() <= 24
-        && request.resource.data.keys().hasOnly(['nickname', 'color', 'updatedAt']);
+        && request.resource.data.keys().hasOnly(['nickname', 'color', 'updatedAt', 'photo', 'profession'])
+        && (!('photo' in request.resource.data) || (request.resource.data.photo is string && request.resource.data.photo.size() < 120000))
+        && (!('profession' in request.resource.data) || (request.resource.data.profession is string && request.resource.data.profession.size() <= 60));
+      // An admin can remove a profile photo that breaks the Circle promise.
+      allow update: if isAdmin() && onlyChanged(['photo']) && !('photo' in request.resource.data);
       allow delete: if false;
     }
 
@@ -142,7 +146,7 @@ service cloud.firestore {
       // Each person can only change their own fields: shared habits, real name, activity, last read.
       allow update: if signedIn() && resource.data.members.hasAny([request.auth.uid])
         && request.resource.data.members == resource.data.members
-        && onlyChanged(['s_' + request.auth.uid, 'n_' + request.auth.uid, 'a_' + request.auth.uid, 'r_' + request.auth.uid]);
+        && onlyChanged(['s_' + request.auth.uid, 'n_' + request.auth.uid, 'p_' + request.auth.uid, 'j_' + request.auth.uid, 'a_' + request.auth.uid, 'r_' + request.auth.uid]);
       allow delete: if signedIn() && resource.data.members.hasAny([request.auth.uid]);
 
       match /messages/{mid} {
@@ -154,6 +158,12 @@ service cloud.firestore {
           && request.resource.data.kind in ['text', 'cheer', 'nudge', 'reveal-ask'];
         allow delete: if signedIn() && resource.data.from == request.auth.uid;
       }
+    }
+
+    // Tags such as Mentor and Certified Leader. Everyone can see them, only admins can give them.
+    match /badges/{uid} {
+      allow read: if signedIn();
+      allow write: if isAdmin();
     }
 
     // Reports go to the Circles team. Only admins can read them.
