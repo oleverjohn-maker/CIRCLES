@@ -1,5 +1,5 @@
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
-import { getAuth, GoogleAuthProvider, signInWithPopup, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+import { getAuth, GoogleAuthProvider, signInWithPopup, signInWithRedirect, getRedirectResult, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 import {
   getFirestore, doc, getDoc, setDoc, updateDoc, deleteDoc, collection, query, where, orderBy, limit,
   onSnapshot, serverTimestamp, getDocs, arrayUnion, arrayRemove, deleteField
@@ -52,6 +52,12 @@ function ago(ts) {
   const d = Math.round(h / 24); return d === 1 ? "yesterday" : d + " days ago";
 }
 const tsOf = v => (v && v.toMillis ? v.toMillis() : 0);
+
+/* ---------------- phones ---------------- */
+const UA = navigator.userAgent || "";
+const IN_APP = /FBAN|FBAV|FB_IAB|Instagram|WhatsApp|LinkedInApp|Snapchat|Line\/|MicroMessenger|; wv\)/i.test(UA);
+const IS_ANDROID = /Android/i.test(UA), IS_IOS = /iPhone|iPad|iPod/i.test(UA);
+function chromeIntent() { return "intent://" + location.host + location.pathname + location.search + "#Intent;scheme=https;package=com.android.chrome;end"; }
 
 /* ---------------- habit maths ---------------- */
 function streak(h) {
@@ -305,7 +311,11 @@ const views = {
         <div class="soft"><b>Stay anonymous</b>Others only see your nickname. Your real name stays private.</div>
       </div>
       ${pendingInvite ? `<div class="soft small">You have been invited to join a Circle. Sign in to continue.</div>` : ""}
-      <button class="btn block" data-act="signin">Continue with Google</button>
+      ${IN_APP ? `<div class="care-card"><b>Please open Circles in ${IS_IOS ? "Safari" : "Chrome"}</b>
+        <p>Google does not allow signing in from inside WhatsApp, Instagram or Facebook. ${IS_IOS ? "Tap the share or menu button and choose <b>Open in Safari</b>." : "Tap the button below, or tap the three dots at the top and choose <b>Open in Chrome</b>."}</p>
+        ${IS_ANDROID ? `<a class="btn block" href="${esc(chromeIntent())}">Open in Chrome</a>` : ""}
+        <button class="btn ghost small" data-act="copyLink" data-link="${esc(location.href)}">Copy the link instead</button></div>` : ""}
+      <button class="btn block ${IN_APP ? "ghost" : ""}" data-act="signin">Continue with Google</button>
       <p class="small muted">This is a test version of Circles for a small group of people. It is for people aged 18 and above.</p>
     </div>`,
 
@@ -756,8 +766,17 @@ async function openPromise(cid, code) {
 
 const actions = {
   async signin() {
-    try { await signInWithPopup(auth, new GoogleAuthProvider()); }
-    catch (e) { if (e.code !== "auth/popup-closed-by-user") toast("Sign in did not work. Please try again."); }
+    const provider = new GoogleAuthProvider();
+    provider.setCustomParameters({ prompt: "select_account" });
+    try { await signInWithPopup(auth, provider); }
+    catch (e) {
+      console.error(e);
+      if (e.code === "auth/popup-closed-by-user" || e.code === "auth/cancelled-popup-request") return;
+      if (e.code === "auth/popup-blocked" || e.code === "auth/operation-not-supported-in-this-environment") { try { return await signInWithRedirect(auth, provider); } catch (e2) { console.error(e2); } }
+      if (e.code === "auth/unauthorized-domain") return toast("Sign in is not allowed on this address yet. Please use the link from the Circles team.");
+      if (e.code === "auth/network-request-failed") return toast("No internet connection. Please check and try again.");
+      toast(IN_APP ? "Please open this link in Chrome or Safari to sign in." : "Sign in did not work (" + (e.code || "unknown") + "). Please try again.");
+    }
   },
   async signout() { if (S.chatSub) { S.chatSub(); S.chatSub = null; } stopSubs(S.subs); stopSubs(S.circleSubs); watchCircles._key = null; await signOut(auth); },
   nav(el) { go(el.dataset.v); if (el.dataset.v === "admin") loadAdmin(); },
@@ -1100,6 +1119,7 @@ document.addEventListener("change", e => {
 });
 actions.sugSince = el => { S.ob.suggest[+el.dataset.i].since = el.value; };
 
+getRedirectResult(auth).catch(e => { console.error(e); if (e.code && e.code !== "auth/no-auth-event") toast("Sign in did not work (" + e.code + "). Please try again."); });
 onAuthStateChanged(auth, user => {
   if (!user) { S.user = null; go("signin"); return; }
   startSession(user).catch(e => { console.error(e); $app.innerHTML = `<div class="empty">Something went wrong while loading Circles. Please refresh the page.</div>`; });
