@@ -59,6 +59,23 @@ function weekStates(h) {
   return out;
 }
 
+/* ---------------- Bible reading plans ---------------- */
+const PLANS = {
+  john21: { name: "Gospel of John in 21 days", book: "JHN", label: "John", n: 21 },
+  mark16: { name: "Gospel of Mark in 16 days", book: "MRK", label: "Mark", n: 16 },
+  psalms30: { name: "Psalms 1 to 30 in 30 days", book: "PSA", label: "Psalm", n: 30 },
+  proverbs31: { name: "Proverbs in 31 days", book: "PRO", label: "Proverbs", n: 31 },
+};
+function planToday(c) {
+  const p = c && PLANS[c.planId]; if (!p || !c.planStart) return null;
+  const d = daysBetween(c.planStart, T());
+  if (d >= p.n) return { p, finished: true };
+  const ch = Math.max(0, d) + 1;
+  return { p, day: ch, ref: p.label + " " + ch, url: "https://www.bible.com/bible/1/" + p.book + "." + ch + ".KJV" };
+}
+const pairId = (a, b) => [a, b].sort().join("_");
+const otherOf = pr => pr.members.find(m => m !== S.user.uid);
+
 /* ---------------- leading a Circle ---------------- */
 const LEAD_DAYS = 30; // days of streak or clean time needed before someone can ask to lead a Circle
 function bestRun() {
@@ -82,6 +99,7 @@ const AREAS = {
 const S = {
   user: null, account: null, profile: null, isAdmin: false,
   habits: [], circles: {}, profiles: {}, nudges: [], request: null,
+  buddies: [], buddyIn: [], buddyOut: [], chat: [], chatSub: null,
   view: "loading", params: {}, ob: {}, confirming: null,
   subs: [], circleSubs: [],
 };
@@ -92,8 +110,19 @@ const invite = (() => {
   try { return JSON.parse(sessionStorage.getItem("circles-invite")); } catch (e) { return null; }
 })();
 let pendingInvite = invite;
+let pendingFriend = (() => {
+  const q = new URLSearchParams(location.search), f = q.get("friend");
+  if (f) { try { sessionStorage.setItem("circles-friend", f); } catch (e) {} history.replaceState(null, "", location.pathname); }
+  try { return sessionStorage.getItem("circles-friend"); } catch (e) { return f; }
+})();
+function clearFriendInvite() { pendingFriend = null; try { sessionStorage.removeItem("circles-friend"); } catch (e) {} }
 
-function go(view, params = {}) { S.view = view; S.params = params; S.confirming = null; render(); window.scrollTo(0, 0); }
+function go(view, params = {}) {
+  if (view !== "buddy" && S.chatSub) { S.chatSub(); S.chatSub = null; S.chat = []; }
+  S.view = view; S.params = params; S.confirming = null;
+  if (view === "buddy") openChat(params.pid);
+  render(); window.scrollTo(0, 0);
+}
 
 /* ---------------- data loading ---------------- */
 async function loadProfiles(ids) {
@@ -122,6 +151,7 @@ async function startSession(user) {
   watchMine();
   if (!S.account.onboarded) return go("ob-privacy");
   if (pendingInvite && !(S.account.circles || []).includes(pendingInvite.c)) return openPromise(pendingInvite.c, pendingInvite.k);
+  if (pendingFriend) return openFriendInvite(pendingFriend);
   go("today");
 }
 
@@ -135,6 +165,21 @@ function watchMine() {
   S.subs.push(onSnapshot(doc(db, "circleRequests", uid), snap => {
     S.request = snap.exists() ? snap.data() : null;
     if (S.view === "circles") render();
+  }, () => {}));
+  S.subs.push(onSnapshot(query(collection(db, "buddies"), where("members", "array-contains", uid)), async snap => {
+    S.buddies = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    await loadProfiles(S.buddies.map(otherOf));
+    if (["today", "friends", "buddy", "circle"].includes(S.view)) render();
+  }, () => {}));
+  S.subs.push(onSnapshot(query(collection(db, "buddyReqs"), where("to", "==", uid)), async snap => {
+    S.buddyIn = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    await loadProfiles(S.buddyIn.map(r => r.from));
+    if (["today", "friends"].includes(S.view)) render();
+  }, () => {}));
+  S.subs.push(onSnapshot(query(collection(db, "buddyReqs"), where("from", "==", uid)), async snap => {
+    S.buddyOut = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    await loadProfiles(S.buddyOut.map(r => r.to));
+    if (["friends", "circle"].includes(S.view)) render();
   }, () => {}));
   S.subs.push(onSnapshot(doc(db, "users", uid), snap => {
     S.account = snap.data() || S.account;
@@ -199,6 +244,9 @@ function scheduleSummary() {
       if (!me) continue;
       try { await updateDoc(doc(db, "circles", cid, "members", S.user.uid), { summary: s, active: serverTimestamp() }); } catch (e) {}
     }
+    for (const b of S.buddies) {
+      try { await updateDoc(doc(db, "buddies", b.id), { ["s_" + S.user.uid]: s }); } catch (e) {}
+    }
   }, 800);
 }
 async function postCheckin(text) {
@@ -221,12 +269,14 @@ async function postCheckin(text) {
 
 /* ---------------- render ---------------- */
 function nav() {
-  const t = (v, label, icon) => `<button data-act="nav" data-v="${v}" class="${S.view === v || (v === "circles" && S.view === "circle") ? "on" : ""}">${icon}<span>${label}</span></button>`;
+  const t = (v, label, icon) => `<button data-act="nav" data-v="${v}" class="${S.view === v || (v === "circles" && S.view === "circle") || (v === "friends" && S.view === "buddy") ? "on" : ""}">${icon}<span>${label}</span></button>`;
   const iToday = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="5" width="16" height="15" rx="3"/><path d="M8 3v4M16 3v4M4 10h16"/></svg>';
   const iCircles = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="9" cy="12" r="6"/><circle cx="15" cy="12" r="6"/></svg>';
+  const iFriends = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="8" cy="9" r="3.2"/><circle cx="16.5" cy="9" r="3.2"/><path d="M2.5 19c.8-3 3-4.6 5.5-4.6s4.7 1.6 5.5 4.6M12.5 15.2c1-.6 2.4-.8 4-.8 2.5 0 4.6 1.6 5.2 4.6"/></svg>';
+  const badge = S.buddyIn.length + S.buddies.filter(unread).length;
   const iMe = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="8" r="4"/><path d="M4 21c1.5-4 4.5-6 8-6s6.5 2 8 6"/></svg>';
   const iAdmin = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3l8 4v5c0 5-3.5 8-8 9-4.5-1-8-4-8-9V7z"/></svg>';
-  return `<nav class="tabs" aria-label="Main"><div>${t("today", "Today", iToday)}${t("circles", "Circles", iCircles)}${t("me", "Me", iMe)}${S.isAdmin ? t("admin", "Admin", iAdmin) : ""}</div></nav>`;
+  return `<nav class="tabs" aria-label="Main"><div>${t("today", "Today", iToday)}${t("circles", "Circles", iCircles)}${t("friends", "Friends" + (badge ? " (" + badge + ")" : ""), iFriends)}${t("me", "Me", iMe)}${S.isAdmin ? t("admin", "Admin", iAdmin) : ""}</div></nav>`;
 }
 function steps(n, total = 5) { return `<div class="steps" aria-label="Step ${n} of ${total}">${Array.from({ length: total }, (_, i) => `<i class="${i < n ? "on" : ""}"></i>`).join("")}</div>`; }
 
@@ -335,6 +385,7 @@ const views = {
         <h1>Hello, ${esc(name)}</h1>
         <div class="row" style="flex-wrap:nowrap"><div class="bar" style="flex:1"><i style="width:${builds.length ? done / builds.length * 100 : 0}%"></i></div><b>${done} of ${builds.length}</b></div></div>
       ${nudges.length ? `<div class="inbox">${nudges.slice(0, 5).map(n => `<div class="note">${avatar(S.profiles[n.from], "sm")}<div><b>${esc((S.profiles[n.from] || {}).nickname || "Someone")}</b> ${n.kind === "cheer" ? "is cheering you on" : "sent you a gentle nudge"}<p class="small muted">${ago(tsOf(n.createdAt))}</p></div><button class="link" data-act="dismissNudge" data-cid="${esc(n.cid)}" data-id="${esc(n.id)}" aria-label="Dismiss">Dismiss</button></div>`).join("")}</div>` : ""}
+      ${S.buddyIn.length || S.buddies.some(unread) ? `<div class="inbox">${S.buddyIn.map(r => `<div class="note">${avatar(S.profiles[r.from], "sm")}<div><b>${esc((S.profiles[r.from] || {}).nickname || "Someone")}</b> wants to be your buddy</div><button class="btn small" data-act="nav" data-v="friends">See</button></div>`).join("")}${S.buddies.filter(unread).map(b => `<div class="note">${avatar(S.profiles[otherOf(b)], "sm")}<div><b>${esc((S.profiles[otherOf(b)] || {}).nickname || "Your buddy")}</b> sent you a message</div><button class="btn small" data-act="openBuddy" data-pid="${esc(b.id)}">Open</button></div>`).join("")}</div>` : ""}
       <section class="stack"><h2>Today's habits</h2>${hs.length ? hs.map(habitCard).join("") : `<div class="empty">You have no habits yet.<button class="btn small" data-act="nav" data-v="me">Add a habit</button></div>`}</section>
       ${(S.account.circles || []).length ? `<section class="stack"><h2>Your check in</h2>
         <div class="card stack">${checked ? `<p class="small muted">You checked in today. You can update it.</p>` : `<p class="small muted">Write one line about your day. Your Circle will see it with your shared habits.</p>`}
@@ -343,7 +394,8 @@ const views = {
           <div id="careSlot"></div></div></section>` : ""}
       <section class="stack"><h2>Your Circles</h2>${myCircles.length ? myCircles.map(c => {
         const ms = c.members || [], ci = ms.filter(m => m.lastCheckIn === T()).length;
-        return `<button class="card circle-card" data-act="openCircle" data-cid="${esc(c.id)}"><b>${esc(c.name || "Circle")}</b><span class="small muted">${ci} of ${ms.length} checked in today</span></button>`;
+        const pt = planToday(c);
+        return `<button class="card circle-card" data-act="openCircle" data-cid="${esc(c.id)}"><b>${esc(c.name || "Circle")}</b><span class="small muted">${ci} of ${ms.length} checked in today</span>${pt && pt.ref ? `<span class="small">Today's reading: <b>${esc(pt.ref)}</b></span>` : ""}</button>`;
       }).join("") : `<div class="empty">You have not joined a Circle yet.<button class="btn small" data-act="nav" data-v="circles">Find a Circle</button></div>`}</section>
     </div>${nav()}`;
   },
@@ -369,6 +421,7 @@ const views = {
       <div class="stack"><button class="back" data-act="nav" data-v="circles">‹ Circles</button>
         <h1>${esc(c.name || "Circle")}</h1>${c.goal ? `<p class="muted">${esc(c.goal)}</p>` : ""}
         ${c.leaderUid ? `<p class="small muted">Led by <b>${esc((S.profiles[c.leaderUid] || {}).nickname || "the Circle leader")}</b></p>` : ""}</div>
+      ${planSection(c, ms, isLead)}
       <section class="stack"><div class="row" style="justify-content:space-between"><h2>Members</h2><span class="small muted">${ms.filter(m => m.lastCheckIn === T()).length} of ${ms.length} checked in today</span></div>
         <div class="members">${ms.map(m => `<button class="member" data-act="pickMember" data-uid="${esc(m.uid)}">${avatar(S.profiles[m.uid]).replace('class="av ', `class="av ${m.lastCheckIn === T() ? "done" : ""} `)}<span>${esc((S.profiles[m.uid] || {}).nickname || "Member")}${m.uid === me ? " (you)" : ""}</span></button>`).join("")}</div>
         ${selM ? memberPanel(c, selM, isLead) : ""}</section>
@@ -392,9 +445,67 @@ const views = {
           <div class="choices"><label class="choice"><input type="radio" name="newT" value="build" checked><b>Build</b><small>Tick it off each day</small></label><label class="choice"><input type="radio" name="newT" value="quit"><b>Quit</b><small>Count days clean</small></label></div>
           <label class="row small"><input type="checkbox" id="newShare" checked> Let my Circles see this habit</label>
           <button class="btn" data-act="addHabit">Add habit</button></div></section>
+      <section class="stack"><h2>Daily reminder</h2><div class="card stack">
+        <p class="small muted">Pick a time and add a daily reminder to your phone's calendar, so you never forget to check in.</p>
+        <div class="field"><label for="remTime">Remind me every day at</label><input type="time" id="remTime" value="${esc(S.ob.remTime || "20:00")}"></div>
+        <div class="row"><button class="btn small" data-act="remGoogle">Add to Google Calendar</button><button class="btn small ghost" data-act="remIcs">Download for iPhone or other calendars</button></div>
+      </div></section>
       <section class="stack"><h2>Need to talk to someone?</h2><div class="care-card"><p>If you are having thoughts of hurting yourself, please call <b>Tele MANAS on 14416</b>. It is free and open day and night. In an emergency, call <b>112</b>.</p></div></section>
       <section class="stack"><h2>About this test</h2><p class="small muted">This is a test version of Circles. Your data may be reset when the test ends. Circles offers support from people who care. It does not replace a doctor or counsellor.</p>
         <button class="btn ghost" data-act="signout">Sign out</button></section>
+    </div>${nav()}`;
+  },
+
+  friends: () => {
+    const link = S.account.myInvite ? location.origin + location.pathname + "?friend=" + S.account.myInvite : "";
+    return `<div class="stack-lg"><h1>Friends</h1>
+      <p class="muted">Buddies are friends who keep each other going. They see the habits you share, can cheer or nudge you, and you can chat privately. Nobody becomes your buddy unless you both agree.</p>
+      ${S.buddyIn.length ? `<section class="stack"><h2>Requests for you</h2>${S.buddyIn.map(r => `<div class="card stack"><div class="row">${avatar(S.profiles[r.from])}<div><b>${esc((S.profiles[r.from] || {}).nickname || "Someone")}</b><p class="small muted">wants to be your buddy</p></div></div>
+          <div class="row"><button class="btn small" data-act="acceptBuddy" data-from="${esc(r.from)}">Accept</button><button class="btn small ghost" data-act="ignoreBuddy" data-from="${esc(r.from)}">Ignore</button></div>
+          <p class="small muted">If you ignore this, they will not be told.</p></div>`).join("")}</section>` : ""}
+      <section class="stack"><h2>Your buddies</h2>${S.buddies.length ? S.buddies.map(b => {
+        const o = otherOf(b), p = S.profiles[o] || {}, sm = b["s_" + o], today = sm && sm.date === T() ? sm.shared || [] : [];
+        const builds = today.filter(h => h.type === "build");
+        return `<button class="card circle-card" data-act="openBuddy" data-pid="${esc(b.id)}"><div class="row">${avatar(p)}<div><b>${esc(p.nickname || "Buddy")}</b>${b["n_" + o] ? ` <span class="small muted">(${esc(b["n_" + o])})</span>` : ""}${unread(b) ? ' <span class="tag lead">New message</span>' : ""}
+          <p class="small muted">${builds.length ? builds.filter(h => h.done).length + " of " + builds.length + " habits done today" : "No shared habits ticked today"}</p></div></div></button>`;
+      }).join("") : `<div class="empty">No buddies yet. Invite a friend below, or tap someone in your Circle and choose Ask to be buddies.</div>`}</section>
+      ${S.buddyOut.length ? `<section class="stack"><h2>Waiting for them to accept</h2>${S.buddyOut.map(r => `<div class="card row" style="justify-content:space-between"><div class="row">${avatar(S.profiles[r.to], "sm")}<b>${esc((S.profiles[r.to] || {}).nickname || "Member")}</b></div><button class="link" data-act="cancelBuddyReq" data-to="${esc(r.to)}">Cancel</button></div>`).join("")}</section>` : ""}
+      <section class="stack"><h2>Invite a friend</h2><div class="card stack">
+        <p class="small muted">Send your personal link to a friend. When they open it and sign in, they can choose to accept. They will see your nickname, not your real name.</p>
+        ${link ? `<div class="copy">${esc(link)}</div><button class="btn small ghost" data-act="copyLink" data-link="${esc(link)}">Copy my invite link</button>` : `<button class="btn" data-act="makeInvite">Create my invite link</button>`}
+      </div></section>
+    </div>${nav()}`;
+  },
+
+  friendInvite: () => {
+    const p = S.profiles[S.params.from] || {};
+    return `<div class="stack-lg" style="padding-top:6vh"><div class="row">${avatar(p, "lg")}<div><p class="label">Buddy invite</p><h1>${esc(p.nickname || "A friend")} wants to be your buddy</h1></div></div>
+      <div class="card stack"><p>If you accept, you will both see the habits you choose to share, you can cheer and nudge each other, and you can chat privately.</p><p class="small muted">Your real name stays private unless you choose to share it.</p></div>
+      <button class="btn block" data-act="acceptInvite">Accept</button><button class="btn ghost block" data-act="declineInvite">No thanks</button></div>`;
+  },
+
+  buddy: () => {
+    const b = S.buddies.find(x => x.id === S.params.pid);
+    if (!b) return `<div class="stack-lg"><button class="back" data-act="nav" data-v="friends">‹ Friends</button><div class="empty">This buddy is no longer connected with you.</div></div>${nav()}`;
+    const o = otherOf(b), me = S.user.uid, p = S.profiles[o] || {}, sm = b["s_" + o];
+    const today = sm && sm.date === T() ? sm.shared || [] : (sm ? (sm.shared || []).map(h => ({ ...h, done: false })) : []);
+    const theirName = b["n_" + o], myShared = b["n_" + me];
+    return `<div class="stack-lg">
+      <div class="stack"><button class="back" data-act="nav" data-v="friends">‹ Friends</button>
+        <div class="row">${avatar(p, "lg")}<div><h1>${esc(p.nickname || "Buddy")}</h1>${theirName ? `<p class="small">Real name: <b>${esc(theirName)}</b></p>` : `<p class="small muted">Real name not shared</p>`}</div></div></div>
+      <section class="stack"><h2>Their habits today</h2>${today.length ? `<div class="chips">${today.map(h => h.type === "build" ? `<span class="chip ${h.done ? "ok" : ""}">${esc(h.name)}${h.done ? " · done" : ""}</span>` : `<span class="chip">${esc(h.name)} · ${h.clean} days clean</span>`).join("")}</div>` : `<p class="small muted">They have not shared any habits.</p>`}
+        <div class="row"><button class="btn small warm" data-act="buddyMsg" data-kind="cheer">Cheer them on</button><button class="btn small ghost" data-act="buddyMsg" data-kind="nudge">Send a nudge</button></div></section>
+      <section class="stack"><h2>Chat</h2>
+        <div class="stack">${S.chat.length ? S.chat.slice().reverse().map(m => chatLine(m, p)).join("") : `<p class="small muted">No messages yet. Say hello.</p>`}</div>
+        <div class="card stack"><textarea id="chatText" maxlength="1000" placeholder="Write a message"></textarea><button class="btn" data-act="buddyMsg" data-kind="text">Send</button></div></section>
+      <section class="stack"><h2>Real names</h2><div class="card stack">
+        ${myShared ? `<p class="small">They can see your real name: <b>${esc(myShared)}</b></p><button class="link" data-act="hideName">Hide my real name from them</button>`
+          : (S.confirming === "reveal" ? `<div class="confirm" style="flex-direction:column;align-items:stretch"><b>Share your real name with ${esc(p.nickname)}?</b><span>They will see <b>${esc(S.account.realName || "your name")}</b>. You can hide it again later, but they may remember it.</span><div class="row"><button class="btn small" data-act="revealName">Yes, share it</button><button class="btn small ghost" data-act="cancel">Cancel</button></div></div>`
+          : `<p class="small muted">Your real name is private. Share it only if you want to.</p><button class="btn small ghost" data-act="revealAsk">Share my real name</button>`)}
+        ${theirName ? "" : `<button class="link" data-act="buddyMsg" data-kind="reveal-ask">Ask them to share their real name</button>`}
+      </div></section>
+      <section class="stack"><button class="link" data-act="unbuddyAsk">Remove buddy</button>
+        ${S.confirming === "unbuddy" ? `<div class="confirm">Stop being buddies with ${esc(p.nickname)}? Your chat will be closed.<button class="btn small danger" data-act="unbuddy">Remove</button><button class="btn small ghost" data-act="cancel">Keep</button></div>` : ""}</section>
     </div>${nav()}`;
   },
 
@@ -428,6 +539,56 @@ const views = {
 function joinForm() {
   return `<div class="card stack"><div class="field"><label for="joinCode">Circle code</label><input type="text" id="joinCode" maxlength="40" placeholder="For example: BIBLE-7K2Q" autocomplete="off" autocapitalize="characters"></div>
     <p class="err" id="codeErr" hidden></p><button class="btn" data-act="lookupCode">Find Circle</button></div>`;
+}
+function unread(b) { const o = otherOf(b); return (b["a_" + o] || 0) > (b["r_" + S.user.uid] || 0); }
+function buddyButton(uid) {
+  if (S.buddies.some(b => b.members.includes(uid))) return `<p class="small muted">You are buddies. <button class="link" data-act="openBuddy" data-pid="${esc(pairId(uid, S.user.uid))}">Open chat</button></p>`;
+  if (S.buddyOut.some(r => r.to === uid)) return `<p class="small muted">Buddy request sent.</p>`;
+  if (S.buddyIn.some(r => r.from === uid)) return `<button class="btn small" data-act="acceptBuddy" data-from="${esc(uid)}">Accept their buddy request</button>`;
+  return `<button class="link" data-act="askBuddy" data-uid="${esc(uid)}">Ask to be buddies</button>`;
+}
+function chatLine(m, other) {
+  const mine = m.from === S.user.uid, who = mine ? "You" : (other.nickname || "Buddy");
+  const body = m.kind === "cheer" ? `${esc(who)} ${mine ? "cheered them on" : "cheered you on"}`
+    : m.kind === "nudge" ? `${esc(who)} ${mine ? "sent a gentle nudge" : "sent you a gentle nudge"}`
+    : m.kind === "reveal-ask" ? `${esc(who)} asked ${mine ? "them" : "you"} to share ${mine ? "their" : "your"} real name.${mine ? "" : " You can choose below."}`
+    : esc(m.text);
+  return `<div class="note" style="${mine ? "border-left-color:var(--accent)" : ""}"><div><b>${esc(who)}</b><p class="post-text">${body}</p><p class="small muted">${ago(tsOf(m.createdAt))}</p></div></div>`;
+}
+function planSection(c, ms, isLead) {
+  const pt = planToday(c), myM = ms.find(m => m.uid === S.user.uid) || {};
+  const picker = isLead ? `<div class="field"><label for="planPick" class="small">${pt ? "Change the reading plan" : "Add a Bible reading plan for this Circle"}</label><div class="row" style="flex-wrap:nowrap"><select id="planPick">${Object.entries(PLANS).map(([k, p]) => `<option value="${k}" ${c.planId === k ? "selected" : ""}>${p.name}</option>`).join("")}</select><button class="btn small" data-act="setPlan">Start today</button></div></div>` : "";
+  if (!pt) return isLead ? `<section class="stack"><h2>Reading plan</h2><div class="card stack">${picker}</div></section>` : "";
+  if (pt.finished) return `<section class="stack"><h2>Reading plan</h2><div class="card stack"><p><b>${esc(pt.p.name)}</b> is finished. Well done, everyone.</p>${picker}</div></section>`;
+  const readers = ms.filter(m => (m.read || {})[T()]).length, mine = !!(myM.read || {})[T()];
+  return `<section class="stack"><h2>Today's reading</h2><div class="card stack">
+    <p class="small muted">${esc(pt.p.name)} · Day ${pt.day} of ${pt.p.n}</p>
+    <h3>${esc(pt.ref)}</h3>
+    <div class="row"><a class="btn small ghost" href="${esc(pt.url)}" target="_blank" rel="noopener">Read ${esc(pt.ref)}</a>
+      <button class="btn small ${mine ? "" : "warm"}" data-act="markRead" aria-pressed="${mine}">${mine ? "Read today ✓" : "Mark as read"}</button></div>
+    <p class="small muted">${readers} of ${ms.length} have read it today</p>
+    ${isLead ? `<details><summary class="small muted">Leader options</summary>${picker}</details>` : ""}</div></section>`;
+}
+function openChat(pid) {
+  if (S.chatSub) { S.chatSub(); S.chatSub = null; }
+  S.chat = [];
+  S.chatSub = onSnapshot(query(collection(db, "buddies", pid, "messages"), orderBy("createdAt", "desc"), limit(80)), snap => {
+    S.chat = snap.docs.map(d => ({ id: d.id, ...d.data({ serverTimestamps: "estimate" }) }));
+    if (S.view === "buddy" && S.params.pid === pid) { markChatRead(pid); render(); }
+  }, () => {});
+}
+let lastReadWrite = 0;
+async function markChatRead(pid) {
+  const b = S.buddies.find(x => x.id === pid); if (!b || !unread(b)) return;
+  if (Date.now() - lastReadWrite < 3000) return; lastReadWrite = Date.now();
+  try { await updateDoc(doc(db, "buddies", pid), { ["r_" + S.user.uid]: Date.now() }); } catch (e) {}
+}
+function icsDate(d) { return d.getFullYear() + pad(d.getMonth() + 1) + pad(d.getDate()) + "T" + pad(d.getHours()) + pad(d.getMinutes()) + "00"; }
+function reminderStart() {
+  const t = (document.getElementById("remTime") || {}).value || "20:00"; S.ob.remTime = t;
+  const [h, m] = t.split(":").map(Number), d = new Date(); d.setHours(h, m, 0, 0);
+  if (d < new Date()) d.setDate(d.getDate() + 1);
+  return d;
 }
 function leadSection() {
   const r = S.request;
@@ -479,7 +640,7 @@ function memberPanel(c, m, isLead) {
   const sum = (m.summary && m.summary.date === T()) ? m.summary.shared || [] : (m.summary ? (m.summary.shared || []).map(h => ({ ...h, done: false })) : []);
   return `<div class="card stack"><div class="row">${avatar(p)}<div><b>${esc(p.nickname || "Member")}</b>${c.leaderUid === m.uid ? '<span class="tag lead">Leader</span>' : ""}<p class="small muted">${m.lastCheckIn === T() ? "Checked in today" : "Not checked in yet today"}</p></div></div>
     ${sum.length ? `<div class="chips">${sum.map(h => h.type === "build" ? `<span class="chip ${h.done ? "ok" : ""}">${esc(h.name)}${h.done ? " · done" : ""}</span>` : `<span class="chip">${esc(h.name)} · ${h.clean} days clean</span>`).join("")}</div>` : `<p class="small muted">No shared habits.</p>`}
-    ${me ? "" : `<div class="row"><button class="btn small warm" data-act="nudge" data-kind="cheer" data-uid="${esc(m.uid)}">Cheer them on</button><button class="btn small ghost" data-act="nudge" data-kind="nudge" data-uid="${esc(m.uid)}">Send a nudge</button></div>`}
+    ${me ? "" : `<div class="row"><button class="btn small warm" data-act="nudge" data-kind="cheer" data-uid="${esc(m.uid)}">Cheer them on</button><button class="btn small ghost" data-act="nudge" data-kind="nudge" data-uid="${esc(m.uid)}">Send a nudge</button></div>${buddyButton(m.uid)}`}
     ${isLead && !me ? `<div class="row">${S.isAdmin && c.leaderUid !== m.uid ? `<button class="link" data-act="makeLeader" data-uid="${esc(m.uid)}">Make leader</button>` : ""}<button class="link" data-act="removeAsk" data-uid="${esc(m.uid)}">Remove from Circle</button></div>
       ${S.confirming === "rm" + m.uid ? `<div class="confirm">Remove ${esc(p.nickname)} from this Circle?<button class="btn small danger" data-act="removeMember" data-uid="${esc(m.uid)}">Remove</button><button class="btn small ghost" data-act="cancel">Cancel</button></div>` : ""}` : ""}</div>`;
 }
@@ -504,7 +665,7 @@ function postCard(c, p, isLead) {
 function render() {
   const v = views[S.view] || views.loading;
   const active = document.activeElement, keepId = active && active.id, keepVal = active && "value" in active ? active.value : null;
-  const drafts = {}; ["checkText", "postText", "joinCode", "newH", "customH", "cName", "cGoal", "rName", "rGoal", "rWhy"].forEach(id => { const el = document.getElementById(id); if (el && el.value) drafts[id] = el.value; });
+  const drafts = {}; ["checkText", "postText", "joinCode", "newH", "customH", "cName", "cGoal", "rName", "rGoal", "rWhy", "chatText"].forEach(id => { const el = document.getElementById(id); if (el && el.value) drafts[id] = el.value; });
   $app.innerHTML = v();
   Object.entries(drafts).forEach(([id, val]) => { const el = document.getElementById(id); if (el && !el.value) el.value = val; });
   if (keepId) { const el = document.getElementById(keepId); if (el) { if (keepVal !== null && "value" in el) el.value = keepVal; el.focus(); } }
@@ -519,7 +680,19 @@ function suggestFrom(keys) {
 async function finishOnboarding() {
   await updateDoc(doc(db, "users", S.user.uid), { onboarded: true });
   S.account.onboarded = true;
+  if (pendingFriend) return openFriendInvite(pendingFriend);
   go("today");
+}
+async function openFriendInvite(token) {
+  try {
+    const inv = await getDoc(doc(db, "invites", token));
+    if (!inv.exists()) { clearFriendInvite(); toast("That friend invite link is not valid any more."); return go("today"); }
+    const from = inv.data().from;
+    if (from === S.user.uid) { clearFriendInvite(); toast("This is your own invite link. Send it to a friend."); return go("friends"); }
+    if (S.buddies.some(b => b.members.includes(from))) { clearFriendInvite(); return go("buddy", { pid: pairId(from, S.user.uid) }); }
+    await loadProfiles([from]);
+    go("friendInvite", { token, from });
+  } catch (e) { clearFriendInvite(); go("today"); }
 }
 async function lookupCircle(code) {
   const k = code.trim().toUpperCase();
@@ -541,7 +714,7 @@ const actions = {
     try { await signInWithPopup(auth, new GoogleAuthProvider()); }
     catch (e) { if (e.code !== "auth/popup-closed-by-user") toast("Sign in did not work. Please try again."); }
   },
-  async signout() { stopSubs(S.subs); stopSubs(S.circleSubs); watchCircles._key = null; await signOut(auth); },
+  async signout() { if (S.chatSub) { S.chatSub(); S.chatSub = null; } stopSubs(S.subs); stopSubs(S.circleSubs); watchCircles._key = null; await signOut(auth); },
   nav(el) { go(el.dataset.v); if (el.dataset.v === "admin") loadAdmin(); },
   cancel() { S.confirming = null; render(); },
 
@@ -680,6 +853,76 @@ const actions = {
     catch (e) { toast("Could not leave. Please try again."); }
   },
 
+  openBuddy(el) { go("buddy", { pid: el.dataset.pid }); },
+  async makeInvite() {
+    const token = Math.random().toString(36).slice(2, 8) + Math.random().toString(36).slice(2, 8);
+    try {
+      await setDoc(doc(db, "invites", token), { from: S.user.uid, createdAt: serverTimestamp() });
+      await updateDoc(doc(db, "users", S.user.uid), { myInvite: token });
+      S.account.myInvite = token; render();
+    } catch (e) { console.error(e); toast("Could not create your link. Please try again."); }
+  },
+  async acceptInvite() {
+    const { token, from } = S.params, me = S.user.uid, pid = pairId(from, me);
+    try {
+      await setDoc(doc(db, "buddies", pid), { members: [from, me].sort(), token, createdAt: serverTimestamp(), ["s_" + me]: summaryFor() });
+      clearFriendInvite(); toast("You are now buddies"); go("buddy", { pid });
+    } catch (e) { console.error(e); toast("Could not accept. Please try again."); }
+  },
+  declineInvite() { clearFriendInvite(); go("today"); },
+  async askBuddy(el) {
+    try { await setDoc(doc(db, "buddyReqs", el.dataset.uid + "_" + S.user.uid), { from: S.user.uid, to: el.dataset.uid, createdAt: serverTimestamp() }); toast("Buddy request sent"); }
+    catch (e) { toast("Could not send. Please try again."); }
+  },
+  async cancelBuddyReq(el) { try { await deleteDoc(doc(db, "buddyReqs", el.dataset.to + "_" + S.user.uid)); } catch (e) {} },
+  async acceptBuddy(el) {
+    const from = el.dataset.from, me = S.user.uid, pid = pairId(from, me);
+    try {
+      await setDoc(doc(db, "buddies", pid), { members: [from, me].sort(), viaReq: true, createdAt: serverTimestamp(), ["s_" + me]: summaryFor() });
+      await deleteDoc(doc(db, "buddyReqs", me + "_" + from));
+      toast("You are now buddies"); go("buddy", { pid });
+    } catch (e) { console.error(e); toast("Could not accept. Please try again."); }
+  },
+  async ignoreBuddy(el) { try { await deleteDoc(doc(db, "buddyReqs", S.user.uid + "_" + el.dataset.from)); } catch (e) {} },
+  async buddyMsg(el) {
+    const pid = S.params.pid, kind = el.dataset.kind;
+    let text = "";
+    if (kind === "text") { const box = document.getElementById("chatText"); text = box.value.trim(); if (!text) return; box.value = ""; }
+    try {
+      await setDoc(doc(db, "buddies", pid, "messages", "m" + Date.now() + uidShort()), { from: S.user.uid, kind, text, createdAt: serverTimestamp() });
+      await updateDoc(doc(db, "buddies", pid), { ["a_" + S.user.uid]: Date.now(), ["r_" + S.user.uid]: Date.now() });
+      if (kind === "cheer") toast("Cheer sent"); else if (kind === "nudge") toast("Nudge sent"); else if (kind === "reveal-ask") toast("Request sent");
+      if (kind === "text" && needsCare(text)) toast("If you are struggling, please call Tele MANAS on 14416, free, day and night.");
+    } catch (e) { console.error(e); toast("Could not send. Please try again."); }
+  },
+  revealAsk() { S.confirming = "reveal"; render(); },
+  async revealName() {
+    try { await updateDoc(doc(db, "buddies", S.params.pid), { ["n_" + S.user.uid]: S.account.realName || S.user.displayName || "" }); S.confirming = null; toast("Your real name is now shared with them"); }
+    catch (e) { toast("Could not share. Please try again."); }
+  },
+  async hideName() { try { await updateDoc(doc(db, "buddies", S.params.pid), { ["n_" + S.user.uid]: deleteField() }); toast("Your real name is hidden again"); } catch (e) {} },
+  unbuddyAsk() { S.confirming = "unbuddy"; render(); },
+  async unbuddy() { try { await deleteDoc(doc(db, "buddies", S.params.pid)); go("friends"); } catch (e) { toast("Could not remove. Please try again."); } },
+  async setPlan() {
+    const planId = document.getElementById("planPick").value;
+    try { await updateDoc(doc(db, "circles", S.params.cid), { planId, planStart: T() }); toast("Reading plan started"); } catch (e) { console.error(e); toast("Could not set the plan."); }
+  },
+  async markRead() {
+    const c = S.circles[S.params.cid], my = (c.members || []).find(m => m.uid === S.user.uid) || {}, on = !!(my.read || {})[T()];
+    try { await updateDoc(doc(db, "circles", c.id, "members", S.user.uid), { ["read." + T()]: on ? deleteField() : true }); } catch (e) { toast("Could not save. Please try again."); }
+  },
+  remGoogle() {
+    const d = reminderStart(), e = new Date(d.getTime() + 10 * 6e4), url = location.origin + location.pathname;
+    const q = new URLSearchParams({ action: "TEMPLATE", text: "Check in on Circles", details: "Tick your habits and write your check in: " + url, dates: icsDate(d) + "/" + icsDate(e), recur: "RRULE:FREQ=DAILY" });
+    window.open("https://calendar.google.com/calendar/render?" + q.toString(), "_blank", "noopener");
+  },
+  remIcs() {
+    const d = reminderStart(), url = location.origin + location.pathname;
+    const ics = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//Circles//Reminder//EN", "BEGIN:VEVENT", "UID:circles-daily-" + S.user.uid + "@circles", "DTSTAMP:" + icsDate(new Date()), "DTSTART:" + icsDate(d), "DURATION:PT10M", "RRULE:FREQ=DAILY",
+      "SUMMARY:Check in on Circles", "DESCRIPTION:Tick your habits and write your check in: " + url, "URL:" + url, "BEGIN:VALARM", "ACTION:DISPLAY", "DESCRIPTION:Time to check in on Circles", "TRIGGER:PT0M", "END:VALARM", "END:VEVENT", "END:VCALENDAR"].join("\r\n");
+    const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([ics], { type: "text/calendar" })); a.download = "circles-reminder.ics";
+    document.body.appendChild(a); a.click(); a.remove();
+  },
   async sendReq() {
     const name = document.getElementById("rName").value.trim(), goal = document.getElementById("rGoal").value.trim();
     const kind = document.getElementById("rKind").value, why = document.getElementById("rWhy").value.trim(), err = document.getElementById("reqErr");

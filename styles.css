@@ -38,7 +38,7 @@ button,input,textarea,select{font:inherit;color:inherit}
 .btn.danger{background:var(--danger);color:#fff}
 .btn:disabled{opacity:.5;cursor:default}
 .link{background:none;border:0;color:var(--muted);text-decoration:underline;text-underline-offset:3px;cursor:pointer;padding:6px 0;font-size:.9rem}
-input[type=text],input[type=date],textarea,select{width:100%;padding:13px 14px;border-radius:12px;border:1.5px solid var(--line);background:var(--surface);font-size:1rem}
+input[type=text],input[type=date],input[type=time],textarea,select{width:100%;padding:13px 14px;border-radius:12px;border:1.5px solid var(--line);background:var(--surface);font-size:1rem}
 textarea{resize:vertical;min-height:88px}
 .field{display:flex;flex-direction:column;gap:6px}
 .field label{font-weight:600}
@@ -134,3 +134,7 @@ nav.tabs button.on{color:var(--accent)}
 #toast{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(84px + env(safe-area-inset-bottom));background:var(--ink);color:var(--bg);padding:10px 16px;border-radius:12px;font-weight:600;z-index:20;max-width:calc(100% - 32px)}
 .empty{border:1.5px dashed var(--line);border-radius:16px;padding:20px;text-align:center;color:var(--muted);display:flex;flex-direction:column;gap:12px;align-items:center}
 @media (prefers-reduced-motion:reduce){*{transition:none!important}}
+
+details summary{cursor:pointer;padding:4px 0}
+details[open] summary{margin-bottom:8px}
+a.btn{text-decoration:none}

@@ -8,6 +8,8 @@ service cloud.firestore {
     function isMember(cid) { return signedIn() && exists(/databases/$(database)/documents/circles/$(cid)/members/$(request.auth.uid)); }
     function isLeader(cid) { return signedIn() && get(/databases/$(database)/documents/circles/$(cid)).data.leaderUid == request.auth.uid; }
     function onlyChanged(keys) { return request.resource.data.diff(resource.data).affectedKeys().hasOnly(keys); }
+    function otherOf(m) { return m[0] == request.auth.uid ? m[1] : m[0]; }
+    function isPairMember(pid) { return signedIn() && get(/databases/$(database)/documents/buddies/$(pid)).data.members.hasAny([request.auth.uid]); }
 
     // Admins are added by hand in the Firebase console.
     match /admins/{uid} {
@@ -44,7 +46,7 @@ service cloud.firestore {
     match /circles/{cid} {
       allow get: if signedIn();
       allow list, create, delete: if isAdmin();
-      allow update: if isAdmin() || (isLeader(cid) && onlyChanged(['goal', 'description']));
+      allow update: if isAdmin() || (isLeader(cid) && onlyChanged(['goal', 'description', 'planId', 'planStart']));
 
       match /members/{uid} {
         allow read: if isMember(cid) || isAdmin();
@@ -105,6 +107,53 @@ service cloud.firestore {
             && request.resource.data.uid == uid && request.resource.data.status == 'pending'
             && request.resource.data.days is int && request.resource.data.days >= 30);
       allow delete: if (isSelf(uid) && resource.data.status != 'approved') || isAdmin();
+    }
+
+    // Personal friend invite links. Anyone who has the link can look it up.
+    match /invites/{token} {
+      allow get: if signedIn();
+      allow create: if signedIn() && request.resource.data.from == request.auth.uid;
+      allow delete: if signedIn() && resource.data.from == request.auth.uid;
+    }
+
+    // Buddy requests from inside a Circle. Only the two people involved can see them.
+    match /buddyReqs/{rid} {
+      allow read: if signedIn() && (resource.data.to == request.auth.uid || resource.data.from == request.auth.uid);
+      allow create: if signedIn()
+        && request.resource.data.from == request.auth.uid
+        && request.resource.data.to != request.auth.uid
+        && rid == request.resource.data.to + '_' + request.auth.uid;
+      allow delete: if signedIn() && (resource.data.to == request.auth.uid || resource.data.from == request.auth.uid);
+    }
+
+    // A buddy pair only exists when the other person invited you (their link or their request) and you accepted.
+    match /buddies/{pid} {
+      allow read: if signedIn() && resource.data.members.hasAny([request.auth.uid]);
+      allow create: if signedIn()
+        && request.resource.data.members.size() == 2
+        && request.resource.data.members.hasAny([request.auth.uid])
+        && request.resource.data.members[0] < request.resource.data.members[1]
+        && pid == request.resource.data.members[0] + '_' + request.resource.data.members[1]
+        && (
+          (request.resource.data.token is string
+            && get(/databases/$(database)/documents/invites/$(request.resource.data.token)).data.from == otherOf(request.resource.data.members))
+          || exists(/databases/$(database)/documents/buddyReqs/$(request.auth.uid + '_' + otherOf(request.resource.data.members)))
+        );
+      // Each person can only change their own fields: shared habits, real name, activity, last read.
+      allow update: if signedIn() && resource.data.members.hasAny([request.auth.uid])
+        && request.resource.data.members == resource.data.members
+        && onlyChanged(['s_' + request.auth.uid, 'n_' + request.auth.uid, 'a_' + request.auth.uid, 'r_' + request.auth.uid]);
+      allow delete: if signedIn() && resource.data.members.hasAny([request.auth.uid]);
+
+      match /messages/{mid} {
+        allow read: if isPairMember(pid);
+        allow create: if isPairMember(pid)
+          && request.resource.data.from == request.auth.uid
+          && request.resource.data.text is string
+          && request.resource.data.text.size() <= 1000
+          && request.resource.data.kind in ['text', 'cheer', 'nudge', 'reveal-ask'];
+        allow delete: if signedIn() && resource.data.from == request.auth.uid;
+      }
     }
 
     // Reports go to the Circles team. Only admins can read them.
