@@ -1,0 +1,100 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() { return request.auth != null; }
+    function isSelf(uid) { return signedIn() && request.auth.uid == uid; }
+    function isAdmin() { return signedIn() && exists(/databases/$(database)/documents/admins/$(request.auth.uid)); }
+    function isMember(cid) { return signedIn() && exists(/databases/$(database)/documents/circles/$(cid)/members/$(request.auth.uid)); }
+    function isLeader(cid) { return signedIn() && get(/databases/$(database)/documents/circles/$(cid)).data.leaderUid == request.auth.uid; }
+    function onlyChanged(keys) { return request.resource.data.diff(resource.data).affectedKeys().hasOnly(keys); }
+
+    // Admins are added by hand in the Firebase console.
+    match /admins/{uid} {
+      allow get: if isSelf(uid);
+      allow write: if false;
+    }
+
+    // Private account: real name, email, which Circles you are in. Only you.
+    match /users/{uid} {
+      allow read, write: if isSelf(uid);
+      // Habits, including private ones. Only you.
+      match /habits/{hid} {
+        allow read, write: if isSelf(uid);
+      }
+    }
+
+    // Public profile inside the app: nickname and colour only.
+    match /profiles/{uid} {
+      allow read: if signedIn();
+      allow create, update: if isSelf(uid)
+        && request.resource.data.nickname is string
+        && request.resource.data.nickname.size() >= 2
+        && request.resource.data.nickname.size() <= 24
+        && request.resource.data.keys().hasOnly(['nickname', 'color', 'updatedAt']);
+      allow delete: if false;
+    }
+
+    // Join codes. You can look up a code you already know, but nobody except admins can list them.
+    match /joinCodes/{code} {
+      allow get: if signedIn();
+      allow list, write: if isAdmin();
+    }
+
+    match /circles/{cid} {
+      allow get: if signedIn();
+      allow list, create, delete: if isAdmin();
+      allow update: if isAdmin() || (isLeader(cid) && onlyChanged(['goal', 'description']));
+
+      match /members/{uid} {
+        allow read: if isMember(cid) || isAdmin();
+        // You can only add yourself, only after agreeing to the promise, and only with this Circle's code.
+        allow create: if isSelf(uid)
+          && request.resource.data.promise == true
+          && request.resource.data.code is string
+          && exists(/databases/$(database)/documents/joinCodes/$(request.resource.data.code))
+          && get(/databases/$(database)/documents/joinCodes/$(request.resource.data.code)).data.cid == cid;
+        allow update: if isSelf(uid) && request.resource.data.code == resource.data.code && request.resource.data.promise == true;
+        allow delete: if isSelf(uid) || isLeader(cid) || isAdmin();
+      }
+
+      match /posts/{pid} {
+        allow read: if isMember(cid) || isAdmin();
+        allow create: if isMember(cid)
+          && request.resource.data.uid == request.auth.uid
+          && request.resource.data.text is string
+          && request.resource.data.text.size() <= 1000
+          && request.resource.data.hidden == false
+          && request.resource.data.cheers is map;
+        allow update: if (isMember(cid) && (
+              // The author edits their own post, but cannot unhide it.
+              (resource.data.uid == request.auth.uid
+                && request.resource.data.uid == request.auth.uid
+                && request.resource.data.hidden == resource.data.hidden
+                && request.resource.data.cheers == resource.data.cheers)
+              // Anyone in the Circle adds or removes only their own cheer.
+              || (onlyChanged(['cheers'])
+                && request.resource.data.cheers.diff(resource.data.cheers).affectedKeys().hasOnly([request.auth.uid]))
+            ))
+          // The Circle leader or an admin can hide or show a post.
+          || ((isLeader(cid) || isAdmin()) && onlyChanged(['hidden']));
+        allow delete: if (signedIn() && resource.data.uid == request.auth.uid) || isAdmin();
+      }
+
+      match /nudges/{nid} {
+        allow read: if signedIn() && (resource.data.to == request.auth.uid || resource.data.from == request.auth.uid);
+        allow create: if isMember(cid)
+          && request.resource.data.from == request.auth.uid
+          && request.resource.data.kind in ['cheer', 'nudge']
+          && exists(/databases/$(database)/documents/circles/$(cid)/members/$(request.resource.data.to));
+        allow delete: if signedIn() && resource.data.to == request.auth.uid;
+      }
+    }
+
+    // Reports go to the Circles team. Only admins can read them.
+    match /reports/{rid} {
+      allow create: if signedIn() && request.resource.data.from == request.auth.uid;
+      allow read: if isAdmin();
+    }
+  }
+}

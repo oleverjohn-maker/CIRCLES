@@ -1,0 +1,674 @@
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+import { getAuth, GoogleAuthProvider, signInWithPopup, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+import {
+  getFirestore, doc, getDoc, setDoc, updateDoc, deleteDoc, collection, query, where, orderBy, limit,
+  onSnapshot, serverTimestamp, getDocs, arrayUnion, arrayRemove, deleteField
+} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { firebaseConfig } from "./firebase-config.js";
+
+const fb = initializeApp(firebaseConfig);
+const auth = getAuth(fb);
+const db = getFirestore(fb);
+
+/* ---------------- helpers ---------------- */
+const $app = document.getElementById("app");
+const pad = n => String(n).padStart(2, "0");
+const ds = d => d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate());
+const todayDate = () => { const d = new Date(); d.setHours(0, 0, 0, 0); return d; };
+const T = () => ds(todayDate());
+const addDays = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); return x; };
+const daysBetween = (a, b) => Math.round((new Date(b + "T00:00") - new Date(a + "T00:00")) / 864e5);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const uidShort = () => Math.random().toString(36).slice(2, 10);
+const COLORS = ["#0E6B5A", "#2F6FB0", "#7A4BB5", "#B5541F", "#C2416B", "#3E7D2E", "#8A6A12", "#4F5B66"];
+const tickSvg = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>';
+const CARE_WORDS = ["suicide", "kill myself", "end my life", "want to die", "self harm", "self-harm", "hurt myself", "cut myself", "no reason to live"];
+const needsCare = t => CARE_WORDS.some(w => t.toLowerCase().includes(w));
+
+function toast(msg) {
+  const t = document.getElementById("toast");
+  t.textContent = msg; t.hidden = false;
+  clearTimeout(toast._t); toast._t = setTimeout(() => (t.hidden = true), 2600);
+}
+function avatar(p, size = "") {
+  const name = (p && p.nickname) || "?";
+  const color = (p && p.color) || COLORS[7];
+  return `<span class="av ${size}" style="background:${esc(color)}" aria-hidden="true">${esc(name.trim().charAt(0).toUpperCase())}</span>`;
+}
+function ago(ts) {
+  if (!ts) return "just now";
+  const m = Math.round((Date.now() - ts) / 6e4);
+  if (m < 1) return "just now"; if (m < 60) return m + " min ago";
+  const h = Math.round(m / 60); if (h < 24) return h + (h === 1 ? " hour ago" : " hours ago");
+  const d = Math.round(h / 24); return d === 1 ? "yesterday" : d + " days ago";
+}
+const tsOf = v => (v && v.toMillis ? v.toMillis() : 0);
+
+/* ---------------- habit maths ---------------- */
+function streak(h) {
+  const log = h.log || {}; let d = log[T()] ? todayDate() : addDays(todayDate(), -1), n = 0;
+  while (log[ds(d)]) { n++; d = addDays(d, -1); } return n;
+}
+function cleanDays(h) { const last = (h.slips || []).slice().sort().pop(); return Math.max(0, daysBetween(last || h.start, T())); }
+function weekStates(h) {
+  const out = [];
+  for (let i = 6; i >= 0; i--) {
+    const k = ds(addDays(todayDate(), -i));
+    out.push(h.type === "build" ? ((h.log || {})[k] ? "y" : "") : ((h.slips || []).includes(k) ? "s" : (k >= h.start ? "y" : "")));
+  }
+  return out;
+}
+
+/* ---------------- suggestions ---------------- */
+const AREAS = {
+  faith: { label: "Faith", sub: "Bible reading, prayer", habits: [["Read the Bible", "build"], ["Pray for 10 minutes", "build"]] },
+  health: { label: "Health", sub: "Gym, sleep, water", habits: [["Go to the gym", "build"], ["Sleep before 11 pm", "build"], ["Drink 8 glasses of water", "build"]] },
+  mind: { label: "Mind", sub: "Reading, less phone time", habits: [["Read for 20 minutes", "build"], ["No phone in the first hour of the day", "build"]] },
+  free: { label: "Break free", sub: "Private by default", habits: [["No pornography", "quit"], ["No smoking", "quit"], ["No alcohol", "quit"]] },
+};
+
+/* ---------------- state ---------------- */
+const S = {
+  user: null, account: null, profile: null, isAdmin: false,
+  habits: [], circles: {}, profiles: {}, nudges: [],
+  view: "loading", params: {}, ob: {}, confirming: null,
+  subs: [], circleSubs: [],
+};
+const invite = (() => {
+  const q = new URLSearchParams(location.search);
+  const c = q.get("join"), k = q.get("code");
+  if (c && k) { try { sessionStorage.setItem("circles-invite", JSON.stringify({ c, k })); } catch (e) {} history.replaceState(null, "", location.pathname); }
+  try { return JSON.parse(sessionStorage.getItem("circles-invite")); } catch (e) { return null; }
+})();
+let pendingInvite = invite;
+
+function go(view, params = {}) { S.view = view; S.params = params; S.confirming = null; render(); window.scrollTo(0, 0); }
+
+/* ---------------- data loading ---------------- */
+async function loadProfiles(ids) {
+  const need = [...new Set(ids)].filter(id => id && !S.profiles[id]);
+  await Promise.all(need.map(async id => {
+    try { const s = await getDoc(doc(db, "profiles", id)); S.profiles[id] = s.exists() ? s.data() : { nickname: "Member" }; }
+    catch (e) { S.profiles[id] = { nickname: "Member" }; }
+  }));
+}
+function stopSubs(list) { list.forEach(u => { try { u(); } catch (e) {} }); list.length = 0; }
+
+async function startSession(user) {
+  S.user = user;
+  const [acc, prof, adm] = await Promise.all([
+    getDoc(doc(db, "users", user.uid)),
+    getDoc(doc(db, "profiles", user.uid)),
+    getDoc(doc(db, "admins", user.uid)).catch(() => null),
+  ]);
+  S.account = acc.exists() ? acc.data() : null;
+  S.profile = prof.exists() ? prof.data() : null;
+  S.isAdmin = !!(adm && adm.exists());
+  if (S.profile) S.profiles[user.uid] = S.profile;
+
+  if (!S.account || !S.account.adult) return go("ob-age");
+  if (!S.profile) return go("ob-name");
+  watchMine();
+  if (!S.account.onboarded) return go("ob-privacy");
+  if (pendingInvite && !(S.account.circles || []).includes(pendingInvite.c)) return openPromise(pendingInvite.c, pendingInvite.k);
+  go("today");
+}
+
+function watchMine() {
+  stopSubs(S.subs);
+  const uid = S.user.uid;
+  S.subs.push(onSnapshot(collection(db, "users", uid, "habits"), snap => {
+    S.habits = snap.docs.map(d => ({ id: d.id, ...d.data() })).sort((a, b) => (a.order || 0) - (b.order || 0));
+    if (["today", "me"].includes(S.view)) render();
+  }));
+  S.subs.push(onSnapshot(doc(db, "users", uid), snap => {
+    S.account = snap.data() || S.account;
+    watchCircles();
+  }));
+}
+
+function watchCircles() {
+  const ids = (S.account && S.account.circles) || [];
+  const key = ids.join(",");
+  if (watchCircles._key === key) return;
+  watchCircles._key = key;
+  stopSubs(S.circleSubs);
+  S.nudges = [];
+  ids.forEach(cid => {
+    S.circles[cid] = S.circles[cid] || { id: cid, members: [], posts: [] };
+    S.circleSubs.push(onSnapshot(doc(db, "circles", cid), s => { Object.assign(S.circles[cid], s.data() || {}, { id: cid }); renderIfCircle(cid); }, () => {}));
+    S.circleSubs.push(onSnapshot(collection(db, "circles", cid, "members"), async s => {
+      S.circles[cid].members = s.docs.map(d => ({ uid: d.id, ...d.data() }));
+      await loadProfiles(S.circles[cid].members.map(m => m.uid));
+      renderIfCircle(cid);
+    }, () => {}));
+    S.circleSubs.push(onSnapshot(query(collection(db, "circles", cid, "posts"), orderBy("createdAt", "desc"), limit(60)), async s => {
+      S.circles[cid].posts = s.docs.map(d => ({ id: d.id, ...d.data({ serverTimestamps: "estimate" }) }));
+      await loadProfiles(S.circles[cid].posts.map(p => p.uid));
+      renderIfCircle(cid);
+    }, () => {}));
+    S.circleSubs.push(onSnapshot(query(collection(db, "circles", cid, "nudges"), where("to", "==", S.user.uid)), async s => {
+      S.nudges = S.nudges.filter(n => n.cid !== cid).concat(s.docs.map(d => ({ id: d.id, cid, ...d.data({ serverTimestamps: "estimate" }) })));
+      await loadProfiles(S.nudges.map(n => n.from));
+      if (S.view === "today") render();
+    }, () => {}));
+  });
+  if (["today", "circles"].includes(S.view)) render();
+}
+function renderIfCircle(cid) {
+  if ((S.view === "circle" && S.params.cid === cid) || ["today", "circles"].includes(S.view)) render();
+}
+
+/* ---------------- writes ---------------- */
+async function saveHabit(h) {
+  const { id, ...rest } = h;
+  await setDoc(doc(db, "users", S.user.uid, "habits", id), rest);
+  scheduleSummary();
+}
+function summaryFor() {
+  const shared = S.habits.filter(h => !h.private);
+  return {
+    date: T(),
+    shared: shared.map(h => h.type === "build"
+      ? { name: h.name, type: "build", done: !!(h.log || {})[T()], streak: streak(h) }
+      : { name: h.name, type: "quit", clean: cleanDays(h) }),
+  };
+}
+let sumTimer = null;
+function scheduleSummary() {
+  clearTimeout(sumTimer);
+  sumTimer = setTimeout(async () => {
+    const s = summaryFor();
+    for (const cid of (S.account.circles || [])) {
+      const me = (S.circles[cid]?.members || []).find(m => m.uid === S.user.uid);
+      if (!me) continue;
+      try { await updateDoc(doc(db, "circles", cid, "members", S.user.uid), { summary: s, active: serverTimestamp() }); } catch (e) {}
+    }
+  }, 800);
+}
+async function postCheckin(text) {
+  const s = summaryFor();
+  const builds = s.shared.filter(h => h.type === "build");
+  const care = needsCare(text);
+  for (const cid of (S.account.circles || [])) {
+    try {
+      const pid = S.user.uid + "_" + T();
+      const body = { uid: S.user.uid, kind: "checkin", text, care, hidden: false, done: builds.filter(h => h.done).length, total: builds.length, date: T(), createdAt: serverTimestamp() };
+      const exists = (S.circles[cid]?.posts || []).some(p => p.id === pid);
+      if (exists) await updateDoc(doc(db, "circles", cid, "posts", pid), body);
+      else await setDoc(doc(db, "circles", cid, "posts", pid), { ...body, cheers: {} });
+      await updateDoc(doc(db, "circles", cid, "members", S.user.uid), { summary: s, lastCheckIn: T(), active: serverTimestamp() });
+    } catch (e) { console.error(e); }
+  }
+  await updateDoc(doc(db, "users", S.user.uid), { lastCheckIn: T(), lastNote: text });
+  return care;
+}
+
+/* ---------------- render ---------------- */
+function nav() {
+  const t = (v, label, icon) => `<button data-act="nav" data-v="${v}" class="${S.view === v || (v === "circles" && S.view === "circle") ? "on" : ""}">${icon}<span>${label}</span></button>`;
+  const iToday = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="5" width="16" height="15" rx="3"/><path d="M8 3v4M16 3v4M4 10h16"/></svg>';
+  const iCircles = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="9" cy="12" r="6"/><circle cx="15" cy="12" r="6"/></svg>';
+  const iMe = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="8" r="4"/><path d="M4 21c1.5-4 4.5-6 8-6s6.5 2 8 6"/></svg>';
+  const iAdmin = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3l8 4v5c0 5-3.5 8-8 9-4.5-1-8-4-8-9V7z"/></svg>';
+  return `<nav class="tabs" aria-label="Main"><div>${t("today", "Today", iToday)}${t("circles", "Circles", iCircles)}${t("me", "Me", iMe)}${S.isAdmin ? t("admin", "Admin", iAdmin) : ""}</div></nav>`;
+}
+function steps(n, total = 5) { return `<div class="steps" aria-label="Step ${n} of ${total}">${Array.from({ length: total }, (_, i) => `<i class="${i < n ? "on" : ""}"></i>`).join("")}</div>`; }
+
+const views = {
+  loading: () => `<div class="splash"><div class="logo-mark" aria-hidden="true"></div><p>Loading Circles…</p></div>`,
+
+  signin: () => `<div class="hero">
+      <div class="logo-mark" aria-hidden="true"></div>
+      <h1>Grow together, one day at a time.</h1>
+      <p class="muted">Circles helps you build good habits and break free from the ones holding you back, with a small group of people who check in with you every day.</p>
+      <div class="cards3">
+        <div class="soft"><b>Track your habits</b>Tick off what you did today and watch your streak grow.</div>
+        <div class="soft"><b>Join a Circle</b>A small group with one shared goal, who notice when you show up.</div>
+        <div class="soft"><b>Stay anonymous</b>Others only see your nickname. Your real name stays private.</div>
+      </div>
+      ${pendingInvite ? `<div class="soft small">You have been invited to join a Circle. Sign in to continue.</div>` : ""}
+      <button class="btn block" data-act="signin">Continue with Google</button>
+      <p class="small muted">This is a test version of Circles for a small group of people. It is for people aged 18 and above.</p>
+    </div>`,
+
+  "ob-age": () => `<div class="stack-lg">${steps(1)}
+      <div class="stack"><h1>How old are you?</h1><p class="muted">Circles is for people aged 18 and above.</p></div>
+      <div class="field"><label for="dob">Your date of birth</label><input type="date" id="dob" max="${T()}"></div>
+      <p class="err" id="ageErr" hidden></p>
+      <button class="btn block" data-act="age">Continue</button></div>`,
+
+  "too-young": () => `<div class="stack-lg" style="padding-top:8vh"><h1>Not yet, but we would love to have you later.</h1>
+      <p class="muted">Circles is only for people aged 18 and above for now. We have not saved anything about you. Please come back when you turn 18.</p>
+      <button class="btn ghost block" data-act="signout">Close</button></div>`,
+
+  "ob-name": () => {
+    const c = S.ob.color || COLORS[0], n = S.ob.nickname || "";
+    return `<div class="stack-lg">${steps(2)}
+      <div class="stack"><h1>Choose a nickname</h1><p class="muted">This is the only name other people in Circles will see. Your real name from Google stays private.</p></div>
+      <div class="row">${avatar({ nickname: n || "?", color: c }, "lg")}<div><b>${esc(n || "Your nickname")}</b><p class="small muted">This is how others will see you</p></div></div>
+      <div class="field"><label for="nick">Nickname</label><input type="text" id="nick" maxlength="24" value="${esc(n)}" placeholder="For example: Morning Runner" autocomplete="off"></div>
+      <div class="field"><label>Colour</label><div class="swatches">${COLORS.map(x => `<button class="swatch ${x === c ? "on" : ""}" style="background:${x}" data-act="color" data-c="${x}" aria-label="Choose this colour"></button>`).join("")}</div></div>
+      <p class="err" id="nickErr" hidden></p>
+      <button class="btn block" data-act="saveName">Continue</button></div>`;
+  },
+
+  "ob-privacy": () => `<div class="stack-lg">${steps(3)}
+      <div class="stack"><h1>What others can see</h1><p class="muted">Circles is a safe space. Here is exactly what is shared.</p></div>
+      <div class="stack">
+        <div class="card"><b>Only your nickname</b><p class="muted small">People in your Circles see your nickname and colour. Never your real name, email or photo.</p></div>
+        <div class="card"><b>Only the habits you share</b><p class="muted small">Every habit has a privacy switch. Habits you keep private are seen by nobody else.</p></div>
+        <div class="card"><b>Only what you choose to write</b><p class="muted small">Your daily check in and posts are seen only by members of your Circle.</p></div>
+      </div>
+      <button class="btn block" data-act="privacyOk">I understand</button></div>`,
+
+  "ob-areas": () => {
+    const sel = S.ob.areas || [];
+    return `<div class="stack-lg">${steps(4)}
+      <div class="stack"><h1>What do you want to work on?</h1><p class="muted">Pick one or more. You can change this any time.</p></div>
+      <div class="choices">${Object.entries(AREAS).map(([k, a]) => `<button class="choice ${sel.includes(k) ? "on" : ""}" data-act="area" data-k="${k}" aria-pressed="${sel.includes(k)}"><b>${a.label}</b><small>${a.sub}</small></button>`).join("")}</div>
+      <button class="btn block" data-act="areasNext" ${sel.length ? "" : "disabled"}>Continue</button>
+      <button class="link" data-act="skipHabits">Skip for now</button></div>`;
+  },
+
+  "ob-habits": () => {
+    const list = S.ob.suggest || [];
+    return `<div class="stack-lg">${steps(5)}
+      <div class="stack"><h1>Your first habits</h1><p class="muted">Untick anything you do not want. Habits you are quitting are private unless you choose to share them.</p></div>
+      <div class="stack">${list.map((h, i) => `<div class="card stack">
+          <label class="row" style="justify-content:space-between"><span><b>${esc(h.name)}</b><span class="tag ${h.type}">${h.type === "build" ? "Build" : "Quit"}</span></span>
+          <input type="checkbox" data-act="sugOn" data-i="${i}" ${h.on ? "checked" : ""} aria-label="Keep ${esc(h.name)}" style="width:22px;height:22px"></label>
+          ${h.on && h.type === "quit" ? `<div class="field"><label for="since${i}" class="small">When did you last do this? Your days clean count from here.</label><input type="date" id="since${i}" data-act="sugSince" data-i="${i}" value="${h.since || T()}" max="${T()}"></div>` : ""}
+          ${h.on ? `<label class="row small"><input type="checkbox" data-act="sugShare" data-i="${i}" ${h.share ? "checked" : ""}> Let my Circle see this habit</label>` : ""}
+        </div>`).join("")}
+        <div class="card stack"><div class="field"><label for="customH">Add your own habit</label><input type="text" id="customH" maxlength="60" placeholder="For example: Call my parents"></div>
+          <div class="row"><button class="btn small ghost" data-act="addCustom" data-t="build">Add as Build</button><button class="btn small ghost" data-act="addCustom" data-t="quit">Add as Quit</button></div></div>
+      </div>
+      <button class="btn block" data-act="saveHabits">Continue</button></div>`;
+  },
+
+  "ob-find": () => `<div class="stack-lg">
+      <div class="stack"><h1>Find your people</h1><p class="muted">Circles are small groups with one goal. Ask your Circle leader for the Circle code, or open the invite link they sent you.</p></div>
+      ${joinForm()}
+      <button class="link" data-act="finishOb">Skip for now</button></div>`,
+
+  promise: () => {
+    const c = S.params.preview || {};
+    return `<div class="stack-lg">
+      <div class="stack"><p class="label">You are joining</p><h1>${esc(c.name || "a Circle")}</h1>${c.goal ? `<p class="muted">${esc(c.goal)}</p>` : ""}</div>
+      <div class="card stack"><h2>The Circle promise</h2>
+        <ol class="stack" style="margin:0;padding-left:20px">
+          <li>I will be honest about my own struggles, and never judge anyone else's.</li>
+          <li>I will not share sexual content or explicit images of any kind.</li>
+          <li>I will not harass or threaten anyone, or share anyone's private details.</li>
+          <li>I will not sell, promote or recruit.</li>
+          <li>What is shared in this Circle stays in this Circle.</li>
+        </ol></div>
+      <p class="err" id="joinErr" hidden></p>
+      <button class="btn block" data-act="promise">I promise</button>
+      <button class="link" data-act="${S.account && S.account.onboarded ? "nav" : "finishOb"}" data-v="circles">Not now</button></div>`;
+  },
+
+  today: () => {
+    const hs = S.habits, builds = hs.filter(h => h.type === "build"), done = builds.filter(h => (h.log || {})[T()]).length;
+    const name = (S.profile && S.profile.nickname) || "friend";
+    const checked = S.account && S.account.lastCheckIn === T();
+    const nudges = S.nudges.filter(n => Date.now() - tsOf(n.createdAt) < 3 * 864e5).sort((a, b) => tsOf(b.createdAt) - tsOf(a.createdAt));
+    const myCircles = (S.account.circles || []).map(id => S.circles[id]).filter(Boolean);
+    return `<div class="stack-lg">
+      <div class="stack"><p class="label">${todayDate().toLocaleDateString("en-IN", { weekday: "long", day: "numeric", month: "long" })}</p>
+        <h1>Hello, ${esc(name)}</h1>
+        <div class="row" style="flex-wrap:nowrap"><div class="bar" style="flex:1"><i style="width:${builds.length ? done / builds.length * 100 : 0}%"></i></div><b>${done} of ${builds.length}</b></div></div>
+      ${nudges.length ? `<div class="inbox">${nudges.slice(0, 5).map(n => `<div class="note">${avatar(S.profiles[n.from], "sm")}<div><b>${esc((S.profiles[n.from] || {}).nickname || "Someone")}</b> ${n.kind === "cheer" ? "is cheering you on" : "sent you a gentle nudge"}<p class="small muted">${ago(tsOf(n.createdAt))}</p></div><button class="link" data-act="dismissNudge" data-cid="${esc(n.cid)}" data-id="${esc(n.id)}" aria-label="Dismiss">Dismiss</button></div>`).join("")}</div>` : ""}
+      <section class="stack"><h2>Today's habits</h2>${hs.length ? hs.map(habitCard).join("") : `<div class="empty">You have no habits yet.<button class="btn small" data-act="nav" data-v="me">Add a habit</button></div>`}</section>
+      ${(S.account.circles || []).length ? `<section class="stack"><h2>Your check in</h2>
+        <div class="card stack">${checked ? `<p class="small muted">You checked in today. You can update it.</p>` : `<p class="small muted">Write one line about your day. Your Circle will see it with your shared habits.</p>`}
+          <textarea id="checkText" maxlength="500" placeholder="For example: Went to the gym and read two chapters.">${esc(checked ? S.account.lastNote || "" : "")}</textarea>
+          <button class="btn" data-act="checkin">${checked ? "Update check in" : "Share my check in"}</button>
+          <div id="careSlot"></div></div></section>` : ""}
+      <section class="stack"><h2>Your Circles</h2>${myCircles.length ? myCircles.map(c => {
+        const ms = c.members || [], ci = ms.filter(m => m.lastCheckIn === T()).length;
+        return `<button class="card circle-card" data-act="openCircle" data-cid="${esc(c.id)}"><b>${esc(c.name || "Circle")}</b><span class="small muted">${ci} of ${ms.length} checked in today</span></button>`;
+      }).join("") : `<div class="empty">You have not joined a Circle yet.<button class="btn small" data-act="nav" data-v="circles">Find a Circle</button></div>`}</section>
+    </div>${nav()}`;
+  },
+
+  circles: () => {
+    const mine = (S.account.circles || []).map(id => S.circles[id]).filter(Boolean);
+    return `<div class="stack-lg"><h1>Circles</h1>
+      ${mine.length ? `<section class="stack">${mine.map(c => `<button class="card circle-card" data-act="openCircle" data-cid="${esc(c.id)}"><b>${esc(c.name || "Circle")}</b><span class="small muted">${esc(c.goal || "")}</span><span class="small muted">${(c.members || []).length} members</span></button>`).join("")}</section>` : ""}
+      <section class="stack"><h2>Join a Circle</h2><p class="muted small">Ask your Circle leader for the Circle code, or open the invite link they sent you.</p>${joinForm()}</section>
+    </div>${nav()}`;
+  },
+
+  circle: () => {
+    const c = S.circles[S.params.cid];
+    if (!c) return `<div class="empty">This Circle could not be found.</div>${nav()}`;
+    const me = S.user.uid, isLead = c.leaderUid === me || S.isAdmin;
+    const ms = (c.members || []).slice().sort((a, b) => (b.lastCheckIn === T()) - (a.lastCheckIn === T()));
+    const posts = (c.posts || []).filter(p => !p.hidden || isLead);
+    const sel = S.params.member;
+    const selM = sel && ms.find(m => m.uid === sel);
+    return `<div class="stack-lg">
+      <div class="stack"><button class="back" data-act="nav" data-v="circles">‹ Circles</button>
+        <h1>${esc(c.name || "Circle")}</h1>${c.goal ? `<p class="muted">${esc(c.goal)}</p>` : ""}
+        ${c.leaderUid ? `<p class="small muted">Led by <b>${esc((S.profiles[c.leaderUid] || {}).nickname || "the Circle leader")}</b></p>` : ""}</div>
+      <section class="stack"><div class="row" style="justify-content:space-between"><h2>Members</h2><span class="small muted">${ms.filter(m => m.lastCheckIn === T()).length} of ${ms.length} checked in today</span></div>
+        <div class="members">${ms.map(m => `<button class="member" data-act="pickMember" data-uid="${esc(m.uid)}">${avatar(S.profiles[m.uid]).replace('class="av ', `class="av ${m.lastCheckIn === T() ? "done" : ""} `)}<span>${esc((S.profiles[m.uid] || {}).nickname || "Member")}${m.uid === me ? " (you)" : ""}</span></button>`).join("")}</div>
+        ${selM ? memberPanel(c, selM, isLead) : ""}</section>
+      <section class="stack"><h2>Write to your Circle</h2>
+        <div class="card stack"><textarea id="postText" maxlength="1000" placeholder="Share a struggle, a win, a prayer request or some encouragement."></textarea>
+          <button class="btn" data-act="post">Post</button><div id="careSlot2"></div></div></section>
+      <section class="stack"><h2>Circle feed</h2>${posts.length ? posts.map(p => postCard(c, p, isLead)).join("") : `<div class="empty">Nothing here yet. Be the first to say hello.</div>`}</section>
+      <section class="stack"><button class="link" data-act="leaveAsk">Leave this Circle</button>
+        ${S.confirming === "leave" ? `<div class="confirm">Leave ${esc(c.name)}? Your posts stay, but you will stop seeing this Circle.<button class="btn small danger" data-act="leave">Leave</button><button class="btn small ghost" data-act="cancel">Stay</button></div>` : ""}</section>
+    </div>${nav()}`;
+  },
+
+  me: () => {
+    const p = S.profile || {};
+    return `<div class="stack-lg"><div class="row">${avatar(p, "lg")}<div><h1>${esc(p.nickname)}</h1><p class="small muted">Private: ${esc(S.account.realName || "")}, ${esc(S.user.email || "")}</p></div></div>
+      <section class="stack"><h2>Your habits</h2>${S.habits.map(h => `<div class="card habit"><div><div class="hname">${esc(h.name)}<span class="tag ${h.type}">${h.type === "build" ? "Build" : "Quit"}</span>${h.private ? '<span class="tag priv">Private</span>' : ""}</div></div>
+          <div class="hactions"><button class="link" data-act="togglePriv" data-id="${esc(h.id)}">${h.private ? "Share with my Circles" : "Make private"}</button><button class="link" data-act="delAsk" data-id="${esc(h.id)}">Remove</button></div>
+          ${S.confirming === "del" + h.id ? `<div class="confirm">Remove this habit and all its history?<button class="btn small danger" data-act="delHabit" data-id="${esc(h.id)}">Remove</button><button class="btn small ghost" data-act="cancel">Keep it</button></div>` : ""}</div>`).join("")}
+        <div class="card stack"><div class="field"><label for="newH">Add a habit</label><input type="text" id="newH" maxlength="60" placeholder="For example: Read 10 pages"></div>
+          <div class="choices"><label class="choice"><input type="radio" name="newT" value="build" checked><b>Build</b><small>Tick it off each day</small></label><label class="choice"><input type="radio" name="newT" value="quit"><b>Quit</b><small>Count days clean</small></label></div>
+          <label class="row small"><input type="checkbox" id="newShare" checked> Let my Circles see this habit</label>
+          <button class="btn" data-act="addHabit">Add habit</button></div></section>
+      <section class="stack"><h2>Need to talk to someone?</h2><div class="care-card"><p>If you are having thoughts of hurting yourself, please call <b>Tele MANAS on 14416</b>. It is free and open day and night. In an emergency, call <b>112</b>.</p></div></section>
+      <section class="stack"><h2>About this test</h2><p class="small muted">This is a test version of Circles. Your data may be reset when the test ends. Circles offers support from people who care. It does not replace a doctor or counsellor.</p>
+        <button class="btn ghost" data-act="signout">Sign out</button></section>
+    </div>${nav()}`;
+  },
+
+  admin: () => {
+    const list = S.params.list || [];
+    const base = location.origin + location.pathname;
+    return `<div class="stack-lg"><h1>Admin</h1>
+      <section class="stack"><h2>Create a Circle</h2><div class="card stack">
+        <div class="field"><label for="cName">Name</label><input type="text" id="cName" maxlength="40" placeholder="For example: Bible in a Year"></div>
+        <div class="field"><label for="cGoal">Daily goal</label><input type="text" id="cGoal" maxlength="100" placeholder="For example: Read one chapter every day"></div>
+        <div class="field"><label for="cKind">Type</label><select id="cKind">${Object.entries(AREAS).map(([k, a]) => `<option value="${k}">${a.label}</option>`).join("")}</select></div>
+        <p class="small muted">You will be the leader. You can hand it over to a member later.</p>
+        <button class="btn" data-act="createCircle">Create Circle</button></div></section>
+      <section class="stack"><h2>All Circles</h2>${list.length ? list.map(c => `<div class="card stack"><b>${esc(c.name)}</b><span class="small muted">${esc(c.goal)}</span>
+          <span class="small">Circle code: <b>${esc(c.code || "")}</b></span>
+          <span class="small muted">Invite link</span><div class="copy">${esc(base + "?join=" + c.id + "&code=" + (c.code || ""))}</div>
+          <button class="btn small ghost" data-act="copyLink" data-link="${esc(base + "?join=" + c.id + "&code=" + (c.code || ""))}">Copy invite link</button></div>`).join("") : `<div class="empty">No Circles yet.</div>`}</section>
+    </div>${nav()}`;
+  },
+};
+
+function joinForm() {
+  return `<div class="card stack"><div class="field"><label for="joinCode">Circle code</label><input type="text" id="joinCode" maxlength="40" placeholder="For example: BIBLE-7K2Q" autocomplete="off" autocapitalize="characters"></div>
+    <p class="err" id="codeErr" hidden></p><button class="btn" data-act="lookupCode">Find Circle</button></div>`;
+}
+function habitCard(h) {
+  const conf = S.confirming === "slip" + h.id;
+  const week = `<div class="week" aria-hidden="true">${weekStates(h).map((c, j) => `<span class="${c}">${addDays(todayDate(), j - 6).toLocaleDateString("en-IN", { weekday: "narrow" })}<i></i></span>`).join("")}</div>`;
+  const tags = `<span class="tag ${h.type}">${h.type === "build" ? "Build" : "Quit"}</span>${h.private ? '<span class="tag priv">Private</span>' : ""}`;
+  if (h.type === "build") {
+    const on = !!(h.log || {})[T()];
+    return `<div class="card habit"><div><div class="hname">${esc(h.name)}${tags}</div><p class="small muted">${streak(h)} day streak${on ? " · done today" : ""}</p></div>
+      <button class="check ${on ? "on" : ""}" data-act="tick" data-id="${esc(h.id)}" aria-pressed="${on}" aria-label="Mark ${esc(h.name)} done today">${tickSvg}</button>${week}</div>`;
+  }
+  const c = cleanDays(h);
+  return `<div class="card habit"><div><div class="hname">${esc(h.name)}${tags}</div></div>
+    <div class="clean"><b>${c}</b><span class="small muted">${c === 1 ? "day" : "days"} clean</span></div>${week}
+    <div class="hactions"><button class="btn small ghost" data-act="slipAsk" data-id="${esc(h.id)}">I slipped today</button></div>
+    ${conf ? `<div class="confirm">That is okay. Your counter starts again from today. Keep going.<button class="btn small" data-act="slip" data-id="${esc(h.id)}">Start again</button><button class="btn small ghost" data-act="cancel">Cancel</button></div>` : ""}</div>`;
+}
+function memberPanel(c, m, isLead) {
+  const p = S.profiles[m.uid] || {}, me = m.uid === S.user.uid;
+  const sum = (m.summary && m.summary.date === T()) ? m.summary.shared || [] : (m.summary ? (m.summary.shared || []).map(h => ({ ...h, done: false })) : []);
+  return `<div class="card stack"><div class="row">${avatar(p)}<div><b>${esc(p.nickname || "Member")}</b>${c.leaderUid === m.uid ? '<span class="tag lead">Leader</span>' : ""}<p class="small muted">${m.lastCheckIn === T() ? "Checked in today" : "Not checked in yet today"}</p></div></div>
+    ${sum.length ? `<div class="chips">${sum.map(h => h.type === "build" ? `<span class="chip ${h.done ? "ok" : ""}">${esc(h.name)}${h.done ? " · done" : ""}</span>` : `<span class="chip">${esc(h.name)} · ${h.clean} days clean</span>`).join("")}</div>` : `<p class="small muted">No shared habits.</p>`}
+    ${me ? "" : `<div class="row"><button class="btn small warm" data-act="nudge" data-kind="cheer" data-uid="${esc(m.uid)}">Cheer them on</button><button class="btn small ghost" data-act="nudge" data-kind="nudge" data-uid="${esc(m.uid)}">Send a nudge</button></div>`}
+    ${isLead && !me ? `<div class="row">${S.isAdmin && c.leaderUid !== m.uid ? `<button class="link" data-act="makeLeader" data-uid="${esc(m.uid)}">Make leader</button>` : ""}<button class="link" data-act="removeAsk" data-uid="${esc(m.uid)}">Remove from Circle</button></div>
+      ${S.confirming === "rm" + m.uid ? `<div class="confirm">Remove ${esc(p.nickname)} from this Circle?<button class="btn small danger" data-act="removeMember" data-uid="${esc(m.uid)}">Remove</button><button class="btn small ghost" data-act="cancel">Cancel</button></div>` : ""}` : ""}</div>`;
+}
+function postCard(c, p, isLead) {
+  const prof = S.profiles[p.uid] || {}, me = S.user.uid;
+  const cheers = Object.keys(p.cheers || {}), mine = !!(p.cheers || {})[me];
+  return `<article class="card post ${p.kind === "checkin" ? "checkin" : ""} ${p.care && isLead ? "care" : ""}">
+    <div class="post-head">${avatar(prof)}<div><b>${esc(prof.nickname || "Member")}</b>${c.leaderUid === p.uid ? '<span class="tag lead">Leader</span>' : ""}<p class="small muted">${p.kind === "checkin" ? "Daily check in · " : ""}${ago(tsOf(p.createdAt))}</p></div></div>
+    ${p.hidden ? `<p class="small muted">Hidden by the Circle leader. Only leaders can see this.</p>` : ""}
+    ${p.care && isLead ? `<p class="small" style="color:var(--warm)"><b>This person may need care.</b> Please reach out to them gently.</p>` : ""}
+    ${p.text ? `<p class="post-text">${esc(p.text)}</p>` : ""}
+    ${p.kind === "checkin" && p.total ? `<div class="chips"><span class="chip ok">${p.done} of ${p.total} ${p.total === 1 ? "habit" : "habits"} done</span></div>` : ""}
+    <div class="row" style="justify-content:space-between">
+      <button class="cheer ${mine ? "on" : ""}" data-act="cheer" data-pid="${esc(p.id)}" aria-pressed="${mine}">${mine ? "Cheered" : "Cheer"}${cheers.length ? " · " + cheers.length : ""}</button>
+      <span class="row">${p.uid !== me ? `<button class="link" data-act="reportAsk" data-pid="${esc(p.id)}">Report</button>` : `<button class="link" data-act="delPost" data-pid="${esc(p.id)}">Delete</button>`}
+      ${isLead ? `<button class="link" data-act="hide" data-pid="${esc(p.id)}" data-h="${p.hidden ? "0" : "1"}">${p.hidden ? "Show" : "Hide"}</button>` : ""}</span></div>
+    ${S.confirming === "rep" + p.id ? `<div class="confirm" style="flex-direction:column;align-items:stretch">Why are you reporting this post?
+      <div class="row">${["Sexual content", "Harassment or threats", "Sharing private details", "Selling or spam", "Something else"].map(r => `<button class="btn small ghost" data-act="report" data-pid="${esc(p.id)}" data-r="${r}">${r}</button>`).join("")}</div><button class="link" data-act="cancel">Cancel</button></div>` : ""}
+  </article>`;
+}
+
+function render() {
+  const v = views[S.view] || views.loading;
+  const active = document.activeElement, keepId = active && active.id, keepVal = active && "value" in active ? active.value : null;
+  const drafts = {}; ["checkText", "postText", "joinCode", "newH", "customH", "cName", "cGoal"].forEach(id => { const el = document.getElementById(id); if (el && el.value) drafts[id] = el.value; });
+  $app.innerHTML = v();
+  Object.entries(drafts).forEach(([id, val]) => { const el = document.getElementById(id); if (el && !el.value) el.value = val; });
+  if (keepId) { const el = document.getElementById(keepId); if (el) { if (keepVal !== null && "value" in el) el.value = keepVal; el.focus(); } }
+}
+
+/* ---------------- actions ---------------- */
+function suggestFrom(keys) {
+  const out = [];
+  keys.forEach(k => (AREAS[k] || { habits: [] }).habits.forEach(([name, type]) => out.push({ name, type, on: true, share: type === "build", since: T() })));
+  return out;
+}
+async function finishOnboarding() {
+  await updateDoc(doc(db, "users", S.user.uid), { onboarded: true });
+  S.account.onboarded = true;
+  go("today");
+}
+async function lookupCircle(code) {
+  const k = code.trim().toUpperCase();
+  const j = await getDoc(doc(db, "joinCodes", k));
+  if (!j.exists()) return null;
+  const c = await getDoc(doc(db, "circles", j.data().cid));
+  return c.exists() ? { id: c.id, ...c.data() } : null;
+}
+async function openPromise(cid, code) {
+  try {
+    const s = await getDoc(doc(db, "circles", cid));
+    if (!s.exists()) { toast("That invite link is not valid any more."); pendingInvite = null; return go(S.account && S.account.onboarded ? "circles" : "ob-areas"); }
+    go("promise", { cid, code, preview: s.data() });
+  } catch (e) { toast("Could not open that Circle. Please try again."); }
+}
+
+const actions = {
+  async signin() {
+    try { await signInWithPopup(auth, new GoogleAuthProvider()); }
+    catch (e) { if (e.code !== "auth/popup-closed-by-user") toast("Sign in did not work. Please try again."); }
+  },
+  async signout() { stopSubs(S.subs); stopSubs(S.circleSubs); watchCircles._key = null; await signOut(auth); },
+  nav(el) { go(el.dataset.v); if (el.dataset.v === "admin") loadAdmin(); },
+  cancel() { S.confirming = null; render(); },
+
+  async age() {
+    const v = document.getElementById("dob").value, err = document.getElementById("ageErr");
+    if (!v) { err.textContent = "Please enter your date of birth."; err.hidden = false; return; }
+    const b = new Date(v + "T00:00"), n = new Date();
+    let age = n.getFullYear() - b.getFullYear(); if (n < new Date(n.getFullYear(), b.getMonth(), b.getDate())) age--;
+    if (age < 18) return go("too-young");
+    await setDoc(doc(db, "users", S.user.uid), { adult: true, realName: S.user.displayName || "", email: S.user.email || "", circles: [], onboarded: false, createdAt: serverTimestamp() }, { merge: true });
+    S.account = { ...(S.account || {}), adult: true, realName: S.user.displayName || "", circles: [], onboarded: false };
+    go(S.profile ? "ob-privacy" : "ob-name");
+  },
+  color(el) { S.ob.nickname = document.getElementById("nick").value; S.ob.color = el.dataset.c; render(); },
+  async saveName() {
+    const n = document.getElementById("nick").value.trim(), err = document.getElementById("nickErr");
+    if (n.length < 2) { err.textContent = "Please choose a nickname with at least 2 letters."; err.hidden = false; return; }
+    const prof = { nickname: n, color: S.ob.color || COLORS[0], updatedAt: serverTimestamp() };
+    await setDoc(doc(db, "profiles", S.user.uid), prof);
+    S.profile = prof; S.profiles[S.user.uid] = prof;
+    watchMine();
+    go("ob-privacy");
+  },
+  privacyOk() { if (pendingInvite) return openPromise(pendingInvite.c, pendingInvite.k); go("ob-areas"); },
+  area(el) { const k = el.dataset.k, a = S.ob.areas || []; S.ob.areas = a.includes(k) ? a.filter(x => x !== k) : [...a, k]; render(); },
+  areasNext() { S.ob.suggest = suggestFrom(S.ob.areas || []); go("ob-habits"); },
+  skipHabits() { go("ob-find"); },
+  sugOn(el) { S.ob.suggest[+el.dataset.i].on = el.checked; render(); },
+  sugShare(el) { S.ob.suggest[+el.dataset.i].share = el.checked; },
+  addCustom(el) {
+    const v = document.getElementById("customH").value.trim(); if (!v) return;
+    document.getElementById("customH").value = "";
+    S.ob.suggest.push({ name: v, type: el.dataset.t, on: true, share: el.dataset.t === "build", since: T() }); render();
+  },
+  async saveHabits() {
+    document.querySelectorAll('[data-act="sugSince"]').forEach(i => { S.ob.suggest[+i.dataset.i].since = i.value || T(); });
+    const keep = (S.ob.suggest || []).filter(h => h.on);
+    let order = Date.now();
+    for (const h of keep) await saveHabit({ id: "h" + uidShort(), name: h.name, type: h.type, private: !h.share, log: {}, slips: [], start: h.type === "quit" ? (h.since || T()) : T(), order: order++ });
+    if ((S.account.circles || []).length) return finishOnboarding();
+    go("ob-find");
+  },
+  finishOb() { pendingInvite = null; try { sessionStorage.removeItem("circles-invite"); } catch (e) {} if (S.account.onboarded) return go("circles"); finishOnboarding(); },
+
+  async lookupCode() {
+    const code = document.getElementById("joinCode").value, err = document.getElementById("codeErr");
+    if (!code.trim()) { err.textContent = "Please enter the Circle code."; err.hidden = false; return; }
+    const c = await lookupCircle(code).catch(() => null);
+    if (!c) { err.textContent = "We could not find a Circle with that code. Please check it with your Circle leader."; err.hidden = false; return; }
+    if ((S.account.circles || []).includes(c.id)) return go("circle", { cid: c.id });
+    go("promise", { cid: c.id, code: code.trim().toUpperCase(), preview: c });
+  },
+  async promise() {
+    const { cid, code } = S.params, err = document.getElementById("joinErr");
+    try {
+      await setDoc(doc(db, "circles", cid, "members", S.user.uid), { promise: true, code, joinedAt: serverTimestamp(), summary: summaryFor(), lastCheckIn: "" });
+      await updateDoc(doc(db, "users", S.user.uid), { circles: arrayUnion(cid) });
+      S.account.circles = [...new Set([...(S.account.circles || []), cid])];
+      pendingInvite = null; try { sessionStorage.removeItem("circles-invite"); } catch (e) {}
+      watchCircles();
+      if (!S.account.onboarded) {
+        if (!S.habits.length) { S.ob.suggest = suggestFrom([S.params.preview && S.params.preview.kind || "faith"]); return go("ob-habits"); }
+        await updateDoc(doc(db, "users", S.user.uid), { onboarded: true }); S.account.onboarded = true;
+      }
+      toast("Welcome to the Circle"); go("circle", { cid });
+    } catch (e) { console.error(e); err.textContent = "We could not add you to this Circle. The code may be wrong. Please check it with your Circle leader."; err.hidden = false; }
+  },
+
+  async tick(el) {
+    const h = S.habits.find(x => x.id === el.dataset.id), log = { ...(h.log || {}) };
+    if (log[T()]) delete log[T()]; else log[T()] = true;
+    h.log = log; render(); await saveHabit(h);
+  },
+  slipAsk(el) { S.confirming = "slip" + el.dataset.id; render(); },
+  async slip(el) {
+    const h = S.habits.find(x => x.id === el.dataset.id); h.slips = [...new Set([...(h.slips || []), T()])];
+    S.confirming = null; render(); await saveHabit(h); toast("Day one starts now. You can do this.");
+  },
+  async addHabit() {
+    const name = document.getElementById("newH").value.trim(); if (!name) return;
+    const type = document.querySelector('input[name="newT"]:checked').value, share = document.getElementById("newShare").checked;
+    document.getElementById("newH").value = "";
+    await saveHabit({ id: "h" + uidShort(), name, type, private: !share, log: {}, slips: [], start: T(), order: Date.now() });
+    toast("Habit added");
+  },
+  async togglePriv(el) { const h = S.habits.find(x => x.id === el.dataset.id); h.private = !h.private; await saveHabit(h); },
+  delAsk(el) { S.confirming = "del" + el.dataset.id; render(); },
+  async delHabit(el) { await deleteDoc(doc(db, "users", S.user.uid, "habits", el.dataset.id)); S.confirming = null; scheduleSummary(); },
+
+  async checkin() {
+    const t = document.getElementById("checkText").value.trim();
+    if (!t) return toast("Write one line about your day first.");
+    const care = await postCheckin(t);
+    toast("Check in shared with your Circle");
+    render();
+    if (care) { const s = document.getElementById("careSlot"); if (s) s.innerHTML = careCard(); }
+  },
+  openCircle(el) { go("circle", { cid: el.dataset.cid }); },
+  pickMember(el) { S.params.member = S.params.member === el.dataset.uid ? null : el.dataset.uid; S.confirming = null; render(); },
+  async post() {
+    const box = document.getElementById("postText"), t = box.value.trim(); if (!t) return;
+    const cid = S.params.cid, care = needsCare(t);
+    try {
+      await setDoc(doc(db, "circles", cid, "posts", "p" + Date.now() + uidShort()), { uid: S.user.uid, kind: "post", text: t, care, hidden: false, cheers: {}, createdAt: serverTimestamp() });
+      box.value = "";
+      if (care) { const s = document.getElementById("careSlot2"); if (s) s.innerHTML = careCard(); }
+    } catch (e) { toast("Could not post. Please try again."); }
+  },
+  async cheer(el) {
+    const cid = S.params.cid, p = (S.circles[cid].posts || []).find(x => x.id === el.dataset.pid);
+    const on = !!(p.cheers || {})[S.user.uid];
+    try { await updateDoc(doc(db, "circles", cid, "posts", p.id), { ["cheers." + S.user.uid]: on ? deleteField() : true }); } catch (e) { toast("Could not cheer. Please try again."); }
+  },
+  reportAsk(el) { S.confirming = "rep" + el.dataset.pid; render(); },
+  async report(el) {
+    try { await setDoc(doc(db, "reports", "r" + Date.now() + uidShort()), { from: S.user.uid, circleId: S.params.cid, postId: el.dataset.pid, reason: el.dataset.r, createdAt: serverTimestamp() }); toast("Thank you. The Circle team will look at this."); }
+    catch (e) { toast("Could not send the report. Please try again."); }
+    S.confirming = null; render();
+  },
+  async delPost(el) { try { await deleteDoc(doc(db, "circles", S.params.cid, "posts", el.dataset.pid)); } catch (e) { toast("Could not delete. Please try again."); } },
+  async hide(el) { try { await updateDoc(doc(db, "circles", S.params.cid, "posts", el.dataset.pid), { hidden: el.dataset.h === "1" }); } catch (e) { toast("Could not change this post."); } },
+  async nudge(el) {
+    try {
+      await setDoc(doc(db, "circles", S.params.cid, "nudges", "n" + Date.now() + uidShort()), { from: S.user.uid, to: el.dataset.uid, kind: el.dataset.kind, createdAt: serverTimestamp() });
+      toast(el.dataset.kind === "cheer" ? "Cheer sent" : "Nudge sent");
+    } catch (e) { toast("Could not send. Please try again."); }
+  },
+  async dismissNudge(el) { try { await deleteDoc(doc(db, "circles", el.dataset.cid, "nudges", el.dataset.id)); } catch (e) {} S.nudges = S.nudges.filter(n => n.id !== el.dataset.id); render(); },
+  removeAsk(el) { S.confirming = "rm" + el.dataset.uid; render(); },
+  async removeMember(el) { try { await deleteDoc(doc(db, "circles", S.params.cid, "members", el.dataset.uid)); S.params.member = null; toast("Member removed"); } catch (e) { toast("Could not remove this member."); } },
+  async makeLeader(el) { try { await updateDoc(doc(db, "circles", S.params.cid), { leaderUid: el.dataset.uid }); toast("New leader set"); } catch (e) { toast("Could not change the leader."); } },
+  leaveAsk() { S.confirming = "leave"; render(); },
+  async leave() {
+    const cid = S.params.cid;
+    try { await deleteDoc(doc(db, "circles", cid, "members", S.user.uid)); await updateDoc(doc(db, "users", S.user.uid), { circles: arrayRemove(cid) }); S.account.circles = (S.account.circles || []).filter(x => x !== cid); delete S.circles[cid]; go("circles"); }
+    catch (e) { toast("Could not leave. Please try again."); }
+  },
+
+  async createCircle() {
+    const name = document.getElementById("cName").value.trim(), goal = document.getElementById("cGoal").value.trim(), kind = document.getElementById("cKind").value;
+    if (!name) return toast("Please give the Circle a name.");
+    const code = (name.replace(/[^A-Za-z]/g, "").slice(0, 5) || "CIRCL").toUpperCase() + "-" + Math.random().toString(36).slice(2, 6).toUpperCase();
+    const id = "c" + Date.now().toString(36);
+    try {
+      await setDoc(doc(db, "circles", id), { name, goal, kind, leaderUid: S.user.uid, createdAt: serverTimestamp() });
+      await setDoc(doc(db, "joinCodes", code), { cid: id, createdAt: serverTimestamp() });
+      await setDoc(doc(db, "circles", id, "members", S.user.uid), { promise: true, code, joinedAt: serverTimestamp(), summary: summaryFor(), lastCheckIn: "" });
+      await updateDoc(doc(db, "users", S.user.uid), { circles: arrayUnion(id) });
+      toast("Circle created"); loadAdmin();
+    } catch (e) { console.error(e); toast("Could not create the Circle."); }
+  },
+  async copyLink(el) {
+    try { await navigator.clipboard.writeText(el.dataset.link); toast("Invite link copied"); }
+    catch (e) { toast("Select the link above and copy it."); }
+  },
+};
+function careCard() {
+  return `<div class="care-card"><b>We are glad you shared this.</b><p>You are not alone. If you are thinking about hurting yourself, please call <b>Tele MANAS on 14416</b>, free, day and night. In an emergency, call <b>112</b>. Your Circle leader will see this so they can check on you.</p></div>`;
+}
+async function loadAdmin() {
+  try {
+    const [snap, codes] = await Promise.all([getDocs(collection(db, "circles")), getDocs(collection(db, "joinCodes"))]);
+    const byCid = {}; codes.docs.forEach(d => { byCid[d.data().cid] = d.id; });
+    const list = snap.docs.map(d => ({ id: d.id, ...d.data(), code: byCid[d.id] || "" }));
+    if (S.view === "admin") { S.params.list = list; render(); }
+  } catch (e) { toast("Could not load Circles."); }
+}
+
+document.addEventListener("click", e => {
+  const el = e.target.closest("[data-act]"); if (!el) return;
+  const a = actions[el.dataset.act]; if (!a) return;
+  if (el.tagName === "INPUT") { if (el.type === "checkbox") a(el); return; }
+  e.preventDefault(); a(el);
+});
+document.addEventListener("change", e => {
+  const el = e.target.closest("[data-act]"); if (!el || el.tagName !== "INPUT" || el.type === "checkbox") return;
+  const a = actions[el.dataset.act]; if (a) a(el);
+});
+actions.sugSince = el => { S.ob.suggest[+el.dataset.i].since = el.value; };
+
+onAuthStateChanged(auth, user => {
+  if (!user) { S.user = null; go("signin"); return; }
+  startSession(user).catch(e => { console.error(e); $app.innerHTML = `<div class="empty">Something went wrong while loading Circles. Please refresh the page.</div>`; });
+});
+
+if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
