@@ -2,7 +2,7 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/fireba
 import { getAuth, GoogleAuthProvider, signInWithPopup, signInWithRedirect, getRedirectResult, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 import {
   getFirestore, doc, getDoc, setDoc, updateDoc, deleteDoc, collection, query, where, orderBy, limit,
-  onSnapshot, serverTimestamp, getDocs, arrayUnion, arrayRemove, deleteField
+  onSnapshot, serverTimestamp, getDocs, arrayUnion, arrayRemove, deleteField, increment
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { firebaseConfig } from "./firebase-config.js";
 
@@ -80,6 +80,44 @@ function weekStates(h) {
 const doneOn = (h, k) => dayState(h, k) === "y";
 const doneToday = h => doneOn(h, T());
 
+/* ---------------- anonymous analytics ---------------- */
+// Only anonymous totals are counted. Nothing here says who did what.
+const slug = t => String(t).toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "").slice(0, 60);
+function habitKey(h) {
+  const known = Object.values(AREAS).some(a => a.habits.some(([n]) => n === h.name));
+  return h.type + "__" + (known ? slug(h.name) : "custom");
+}
+function habitLabel(key) {
+  const [type, rest] = key.split("__");
+  if (rest === "custom") return type === "build" ? "Their own habit to build" : "Their own habit to quit";
+  for (const a of Object.values(AREAS)) for (const [n] of a.habits) if (slug(n) === rest) return n;
+  return rest.replace(/_/g, " ");
+}
+async function bump(docId, field, by = 1) {
+  const data = field.includes(".") ? { [field.split(".")[0]]: { [field.split(".")[1]]: increment(by) } } : { [field]: increment(by) };
+  try { await setDoc(doc(db, "analytics", docId), data, { merge: true }); } catch (e) { console.warn("analytics", e.code || e); }
+}
+const dayDoc = () => "day-" + T();
+
+/* ---------------- journal ---------------- */
+const MOODS = [
+  { k: "great", label: "Great", color: "#1F8A5B" }, { k: "good", label: "Good", color: "#5E9E3B" },
+  { k: "okay", label: "Okay", color: "#C29A1E" }, { k: "low", label: "Low", color: "#D9722B" },
+  { k: "struggling", label: "Struggling", color: "#B3261E" },
+];
+const moodOf = k => MOODS.find(m => m.k === k);
+function moodFace(k, size = 40) {
+  const m = moodOf(k) || MOODS[2];
+  const mouth = { great: "M13 25q7 7 14 0", good: "M14 25q6 4 12 0", okay: "M14 26h12", low: "M14 28q6-4 12 0", struggling: "M13 29q7-7 14 0" }[m.k];
+  return `<svg width="${size}" height="${size}" viewBox="0 0 40 40" aria-hidden="true"><circle cx="20" cy="20" r="18" fill="${m.color}"/><circle cx="14" cy="16" r="2.4" fill="#fff"/><circle cx="26" cy="16" r="2.4" fill="#fff"/><path d="${mouth}" stroke="#fff" stroke-width="2.6" fill="none" stroke-linecap="round"/></svg>`;
+}
+const PROMPTS = [
+  "What are you thankful for today?", "What was hard today, and how did you get through it?", "What is one small win from today?",
+  "Where did you see God at work today?", "What is on your heart right now?", "Who helped you today, or who did you help?",
+  "What do you want tomorrow to look like?", "What tempted you today, and what did you do?", "What is one thing you learned about yourself today?",
+];
+const promptToday = () => PROMPTS[Math.floor(Date.now() / 864e5) % PROMPTS.length];
+
 /* ---------------- stats ---------------- */
 /* ---------------- badges ---------------- */
 const TIERS = { bronze: ["#B8743A", "#E9C7A4"], silver: ["#6E8293", "#D5DEE5"], gold: ["#C38E12", "#F6DF9C"], royal: ["#5B3A9E", "#D8CBF2"] };
@@ -137,6 +175,7 @@ async function checkBadges() {
     S.account.earned = { ...have }; fresh.forEach(f => { S.account.earned[f.k] = upd["earned." + f.k]; });
     const top = Math.max(...Object.values(S.account.earned).map(e => e.n));
     if (S.profile && S.profile.topBadge !== top) { try { await updateDoc(doc(db, "profiles", S.user.uid), { topBadge: top }); S.profile.topBadge = top; } catch (e) {} }
+    fresh.forEach(f => bump("badges", "d" + f.b.days));
     const best = fresh.sort((a, b) => b.b.days - a.b.days)[0];
     S.celebrate = best; render();
   } catch (e) { console.error(e); }
@@ -222,7 +261,7 @@ const AREAS = {
 const S = {
   user: null, account: null, profile: null, isAdmin: false,
   habits: [], circles: {}, profiles: {}, nudges: [], request: null,
-  buddies: [], buddyIn: [], buddyOut: [], chat: [], chatSub: null,
+  buddies: [], buddyIn: [], buddyOut: [], chat: [], chatSub: null, journal: [], crop: null,
   view: "loading", params: {}, ob: {}, confirming: null,
   subs: [], circleSubs: [],
 };
@@ -258,6 +297,17 @@ async function loadProfiles(ids) {
     catch (e) { S.profiles[id] = { nickname: "Member", tags: [] }; }
   }));
 }
+async function countOnce() {
+  if (!S.account || !S.user) return;
+  if (S.account.lastActive !== T()) {
+    S.account.lastActive = T();
+    try { await updateDoc(doc(db, "users", S.user.uid), { lastActive: T() }); bump(dayDoc(), "active"); } catch (e) {}
+  }
+  if (!S.account.counted && S.habits.length) {
+    S.account.counted = true;
+    try { await updateDoc(doc(db, "users", S.user.uid), { counted: true }); S.habits.forEach(h => bump("habits", habitKey(h))); } catch (e) {}
+  }
+}
 function stopSubs(list) { list.forEach(u => { try { u(); } catch (e) {} }); list.length = 0; }
 
 async function startSession(user) {
@@ -287,8 +337,12 @@ function watchMine() {
   S.subs.push(onSnapshot(collection(db, "users", uid, "habits"), snap => {
     S.habits = snap.docs.map(d => ({ id: d.id, ...d.data() })).sort((a, b) => (a.order || 0) - (b.order || 0));
     if (["today", "me", "stats"].includes(S.view)) render();
-    checkBadges();
+    checkBadges(); countOnce();
   }));
+  S.subs.push(onSnapshot(query(collection(db, "users", uid, "journal"), orderBy("date", "desc"), limit(60)), snap => {
+    S.journal = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    if (["today", "journal"].includes(S.view)) render();
+  }, () => {}));
   S.subs.push(onSnapshot(doc(db, "circleRequests", uid), snap => {
     S.request = snap.exists() ? snap.data() : null;
     if (S.view === "circles") render();
@@ -347,9 +401,10 @@ function renderIfCircle(cid) {
 }
 
 /* ---------------- writes ---------------- */
-async function saveHabit(h) {
+async function saveHabit(h, isNew = false) {
   const { id, ...rest } = h;
   await setDoc(doc(db, "users", S.user.uid, "habits", id), rest);
+  if (isNew && S.account && S.account.counted) bump("habits", habitKey(h));
   scheduleSummary();
 }
 function summaryFor() {
@@ -377,6 +432,7 @@ function scheduleSummary() {
   }, 800);
 }
 async function postCheckin(text) {
+  if (!(S.account.checkins || {})[T()]) bump(dayDoc(), "checkins");
   const s = summaryFor();
   const builds = s.shared.filter(h => h.type === "build");
   const care = needsCare(text);
@@ -457,6 +513,7 @@ const views = {
         <div class="card"><b>Only the habits you share</b><p class="muted small">Every habit has a privacy switch. Habits you keep private are seen by nobody else.</p></div>
         <div class="card"><b>Only what you choose to write</b><p class="muted small">Your daily check in and posts are seen only by members of your Circle.</p></div>
       </div>
+      <p class="small muted">To improve Circles, we count anonymous totals, for example how many people are quitting smoking. These numbers never show who you are, and your journal is never read.</p>
       <button class="btn block" data-act="privacyOk">I understand</button></div>`,
 
   "ob-areas": () => {
@@ -519,6 +576,7 @@ const views = {
         <div class="row" style="flex-wrap:nowrap"><div class="bar" style="flex:1"><i style="width:${builds.length ? done / builds.length * 100 : 0}%"></i></div><b>${done} of ${builds.length}</b></div><p class="small muted">${builds.length ? (done === builds.length ? "Everything done for today. Well done." : "habits kept today") : "Add a habit to get started"}</p></div>
       ${nudges.length ? `<div class="inbox">${nudges.slice(0, 5).map(n => `<div class="note">${avatar(S.profiles[n.from], "sm")}<div><b>${esc((S.profiles[n.from] || {}).nickname || "Someone")}</b> ${n.kind === "cheer" ? "is cheering you on" : "sent you a gentle nudge"}<p class="small muted">${ago(tsOf(n.createdAt))}</p></div><button class="link" data-act="dismissNudge" data-cid="${esc(n.cid)}" data-id="${esc(n.id)}" aria-label="Dismiss">Dismiss</button></div>`).join("")}</div>` : ""}
       ${S.buddyIn.length || S.buddies.some(unread) ? `<div class="inbox">${S.buddyIn.map(r => `<div class="note">${avatar(S.profiles[r.from], "sm")}<div><b>${esc((S.profiles[r.from] || {}).nickname || "Someone")}</b> wants to be your buddy</div><button class="btn small" data-act="nav" data-v="friends">See</button></div>`).join("")}${S.buddies.filter(unread).map(b => `<div class="note">${avatar(S.profiles[otherOf(b)], "sm")}<div><b>${esc((S.profiles[otherOf(b)] || {}).nickname || "Your buddy")}</b> sent you a message</div><button class="btn small" data-act="openBuddy" data-pid="${esc(b.id)}">Open</button></div>`).join("")}</div>` : ""}
+      ${moodCard()}
       <section class="stack"><h2>Today's habits</h2>${hs.length ? hs.map(habitCard).join("") : `<div class="empty">You have no habits yet.<button class="btn small" data-act="nav" data-v="me">Add a habit</button></div>`}</section>
       ${hs.length ? `<section class="stack"><h2>Your week so far</h2><button class="card circle-card" data-act="nav" data-v="stats">
         <div class="row" style="flex-wrap:nowrap"><div class="bar" style="flex:1"><i style="width:${wk.pct}%"></i></div><b>${wk.pct}%</b></div>
@@ -582,12 +640,13 @@ const views = {
       <section class="stack"><h2>Your profile</h2><div class="card stack">
         <div class="field"><label for="pNick">Nickname</label><input type="text" id="pNick" maxlength="24" value="${esc(p.nickname || "")}"></div>
         <div class="field"><label>Profile photo (optional)</label>
-          <div class="row">${avatar(p, "lg", photo)}<div class="stack" style="gap:6px"><label class="btn small ghost" for="pPhoto" style="cursor:pointer">${photo ? "Change photo" : "Add a photo"}</label><input type="file" id="pPhoto" accept="image/*" data-act="pickPhoto" hidden>${photo ? `<button class="link" data-act="removePhoto">Remove photo</button>` : ""}</div></div>
+          <div class="row">${avatar(p, "lg", photo)}<div class="stack" style="gap:6px"><label class="btn small ghost" for="pPhoto" style="cursor:pointer">${photo ? "Choose a new photo" : "Add a photo"}</label><input type="file" id="pPhoto" accept="image/*" data-act="pickPhoto" hidden>${photo ? `<button class="btn small ghost" data-act="adjustPhoto">Adjust photo</button><button class="link" data-act="removePhoto">Remove photo</button>` : ""}</div></div>
           <p class="small muted">If you want to stay anonymous in your Circles, choose a picture that is not your face, or keep it private below.</p>
           ${vis("pPhotoVis", a.photoPublic)}</div>
         <div class="field"><label for="pJob">Profession (optional)</label><input type="text" id="pJob" maxlength="60" value="${esc(a.profession || "")}" placeholder="For example: Teacher, Software engineer, Student">
           ${vis("pJobVis", a.professionPublic)}</div>
         <button class="btn" data-act="saveProfile">Save profile</button></div></section>
+      <section class="stack"><h2>My journal</h2><button class="card circle-card" data-act="nav" data-v="journal"><b>Open my private journal</b><span class="small muted">${S.journal.length} ${S.journal.length === 1 ? "entry" : "entries"}. Only you can read it.</span></button></section>
       <section class="stack"><div class="row" style="justify-content:space-between"><h2>Your badges</h2><button class="link" data-act="nav" data-v="stats">See your stats</button></div><div class="card">${badgeShelf(48)}</div></section>
       <section class="stack"><div class="row" style="justify-content:space-between"><h2>Your habits</h2><button class="link" data-act="nav" data-v="stats">See your stats</button></div>${S.habits.map(h => `<div class="card habit"><div><div class="hname">${esc(h.name)}<span class="tag ${h.type}">${h.type === "build" ? "Build" : "Quit"}</span>${h.private ? '<span class="tag priv">Private</span>' : ""}</div></div>
           <div class="hactions"><button class="link" data-act="togglePriv" data-id="${esc(h.id)}">${h.private ? "Share with my Circles" : "Make private"}</button><button class="link" data-act="delAsk" data-id="${esc(h.id)}">Remove</button></div>
@@ -604,6 +663,27 @@ const views = {
       <section class="stack"><h2>Need to talk to someone?</h2><div class="care-card"><p>If you are having thoughts of hurting yourself, please call <b>Tele MANAS on 14416</b>. It is free and open day and night. In an emergency, call <b>112</b>.</p></div></section>
       <section class="stack"><h2>About this test</h2><p class="small muted">This is a test version of Circles. Your data may be reset when the test ends. Circles offers support from people who care. It does not replace a doctor or counsellor.</p>
         <button class="btn ghost" data-act="signout">Sign out</button></section>
+    </div>${nav()}`;
+  },
+
+  journal: () => {
+    const e = S.journal.find(x => x.id === T()) || {}, mood = S.params.mood || e.mood || "";
+    const strip = Array.from({ length: 14 }, (_, i) => { const k = ds(addDays(todayDate(), i - 13)), en = S.journal.find(x => x.id === k);
+      return `<div style="display:flex;flex-direction:column;align-items:center;gap:2px;font-size:.66rem;color:var(--muted)">${en && en.mood ? moodFace(en.mood, 20) : '<span style="width:20px;height:20px;border-radius:50%;background:var(--soft);display:block"></span>'}${addDays(todayDate(), i - 13).toLocaleDateString("en-IN", { weekday: "narrow" })}</div>`; }).join("");
+    const past = S.journal.filter(x => x.id !== T());
+    return `<div class="stack-lg"><div class="stack"><button class="back" data-act="nav" data-v="today">‹ Today</button><h1>My journal</h1>
+        <p class="small muted">Your journal is private. Only you can read it, unless you choose to share an entry.</p></div>
+      <section class="stack"><h2>Last two weeks</h2><div class="card" style="display:flex;justify-content:space-between;gap:2px;overflow-x:auto">${strip}</div></section>
+      <section class="stack"><h2>Today</h2><div class="card stack">
+        <b>How are you feeling?</b>
+        <div class="row" style="justify-content:space-between;flex-wrap:nowrap">${MOODS.map(m => `<button class="mood ${mood === m.k ? "on" : ""}" data-act="pickMood" data-m="${m.k}" aria-pressed="${mood === m.k}">${moodFace(m.k, 40)}<span>${m.label}</span></button>`).join("")}</div>
+        <label for="jText" class="small muted" style="margin-top:6px">${esc(promptToday())}</label>
+        <textarea id="jText" maxlength="3000" style="min-height:140px" placeholder="Write anything you are feeling. Nobody else will see this.">${esc(e.text || "")}</textarea>
+        <button class="btn" data-act="saveJournal">${e.text || e.mood ? "Save changes" : "Save to my journal"}</button>
+        ${mood === "struggling" || needsCare(e.text || "") ? careCardJournal() : ""}
+        ${e.text && (S.account.circles || []).length ? (S.confirming === "shareJ" ? `<div class="confirm">Share today's entry with your Circles? They will see what you wrote and how you feel.<button class="btn small" data-act="shareJournal">Share</button><button class="btn small ghost" data-act="cancel">Keep private</button></div>` : `<button class="link" data-act="shareJAsk">Share today's entry with my Circles</button>`) : ""}
+      </div></section>
+      <section class="stack"><h2>Earlier entries</h2>${past.length ? past.map(x => `<div class="card stack" style="gap:8px"><div class="row">${x.mood ? moodFace(x.mood, 28) : ""}<div><b>${new Date(x.id + "T00:00").toLocaleDateString("en-IN", { weekday: "long", day: "numeric", month: "long" })}</b>${x.mood ? `<p class="small muted">Felt ${esc(moodOf(x.mood).label.toLowerCase())}</p>` : ""}</div></div>${x.prompt ? `<p class="small muted">${esc(x.prompt)}</p>` : ""}${x.text ? `<p class="post-text">${esc(x.text)}</p>` : ""}</div>`).join("") : `<div class="empty">Your earlier entries will appear here.</div>`}</section>
     </div>${nav()}`;
   },
 
@@ -701,6 +781,7 @@ const views = {
     const base = location.origin + location.pathname;
     const reqs = (S.params.requests || []).filter(r => r.status === "pending");
     return `<div class="stack-lg"><h1>Admin</h1>
+      <section class="stack"><h2>Insights</h2>${S.params.insights ? insightsView(S.params.insights) : `<div class="card stack"><p class="small muted">See how people are using Circles: who is active, which habits people are building and quitting, moods, check ins and badges. Everything is an anonymous total.</p><button class="btn small" data-act="loadInsights">Show insights</button></div>`}</section>
       <section class="stack"><h2>Requests to lead a Circle</h2>${reqs.length ? reqs.map(r => `<div class="card stack">
           <div class="row">${avatar(S.profiles[r.uid])}<div><b>${esc((S.profiles[r.uid] || {}).nickname || "Member")}</b><p class="small muted">Asked ${ago(tsOf(r.createdAt))}</p></div></div>
           <div class="chips"><span class="chip ok">${esc(r.habitName)} · ${r.days} ${r.habitType === "quit" ? "days clean" : "day streak"}</span></div>
@@ -798,6 +879,90 @@ function reminderStart() {
   if (d < new Date()) d.setDate(d.getDate() + 1);
   return d;
 }
+async function saveJournalEntry(part) {
+  const e = S.journal.find(x => x.id === T()), first = !e;
+  const body = { date: T(), prompt: promptToday(), updatedAt: serverTimestamp(), ...part };
+  if (part.text === undefined && e && e.text) body.text = e.text;
+  try {
+    await setDoc(doc(db, "users", S.user.uid, "journal", T()), body, { merge: true });
+    if (first) bump(dayDoc(), "journals");
+    const oldM = e && e.mood, newM = part.mood;
+    if (newM && newM !== oldM) { bump(dayDoc(), "moods." + newM); if (oldM) bump(dayDoc(), "moods." + oldM, -1); }
+  } catch (err) { console.error(err); toast("Could not save. Please try again."); }
+}
+function moodCard() {
+  const e = S.journal.find(x => x.id === T());
+  if (e && e.mood) return `<button class="card circle-card" data-act="nav" data-v="journal"><div class="row" style="flex-wrap:nowrap">${moodFace(e.mood, 36)}<div><b>Today you feel ${esc(moodOf(e.mood).label.toLowerCase())}</b><p class="small muted">${e.text ? "You wrote in your journal today." : "Add a few words to your journal."}</p></div></div></button>`;
+  return `<section class="stack"><h2>How are you feeling today?</h2><div class="card row" style="justify-content:space-between;flex-wrap:nowrap">${MOODS.map(m => `<button class="mood" data-act="quickMood" data-m="${m.k}">${moodFace(m.k, 36)}<span>${m.label}</span></button>`).join("")}</div></section>`;
+}
+function careCardJournal() {
+  return `<div class="care-card"><b>We are glad you wrote this down.</b><p>You do not have to carry this alone. Think about telling a buddy or your Circle. If you are thinking about hurting yourself, please call <b>Tele MANAS on 14416</b>, free, day and night. In an emergency, call <b>112</b>.</p></div>`;
+}
+function bars(rows, color = "var(--accent)") {
+  const max = Math.max(1, ...rows.map(r => r[1]));
+  return rows.length ? `<div class="stack" style="gap:8px">${rows.map(([l, v]) => `<div><div class="row" style="justify-content:space-between;flex-wrap:nowrap"><span class="small">${esc(l)}</span><b class="small">${v}</b></div><div class="bar" style="height:8px"><i style="width:${v / max * 100}%;background:${color}"></i></div></div>`).join("")}</div>` : `<p class="small muted">No data yet.</p>`;
+}
+function insightsView(d) {
+  const days = Array.from({ length: 14 }, (_, i) => ds(addDays(todayDate(), i - 13)));
+  const dd = k => d.daily[k] || {};
+  const sum = (ks, f) => ks.reduce((t, k) => t + (dd(k)[f] || 0), 0);
+  const last7 = days.slice(7);
+  const maxA = Math.max(1, ...days.map(k => dd(k).active || 0));
+  const moods = {}; last7.forEach(k => Object.entries(dd(k).moods || {}).forEach(([m, n]) => { moods[m] = (moods[m] || 0) + n; }));
+  const hab = Object.entries(d.habits || {}).filter(([, n]) => n > 0);
+  const build = hab.filter(([k]) => k.startsWith("build__")).sort((a, b) => b[1] - a[1]).map(([k, n]) => [habitLabel(k), n]);
+  const quit = hab.filter(([k]) => k.startsWith("quit__")).sort((a, b) => b[1] - a[1]).map(([k, n]) => [habitLabel(k), n]);
+  const tile = (big, small) => `<div class="card" style="padding:14px"><b style="font-family:var(--display);font-size:1.6rem;display:block">${big}</b><span class="small muted">${small}</span></div>`;
+  return `<div class="stack">
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">${tile(d.people, "people signed up")}${tile(dd(T()).active || 0, "active today")}${tile(sum(last7, "active"), "visits in the last 7 days")}${tile(dd(T()).checkins || 0, "check ins today")}</div>
+    <div class="card stack"><b>Active people, last 14 days</b>
+      <div style="display:flex;align-items:flex-end;gap:4px;height:120px">${days.map(k => `<div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%;gap:2px"><span style="font-size:.62rem;color:var(--muted)">${dd(k).active || ""}</span><div style="width:100%;border-radius:4px 4px 0 0;background:${k === T() ? "var(--warm)" : "var(--accent)"};height:${(dd(k).active || 0) / maxA * 90}%;min-height:2px"></div></div>`).join("")}</div>
+      <div style="display:flex;gap:4px">${days.map(k => `<span style="flex:1;text-align:center;font-size:.62rem;color:var(--muted)">${Number(k.slice(8))}</span>`).join("")}</div>
+      <p class="small muted">New sign ups in 14 days: ${sum(days, "signups")} · Check ins in 7 days: ${sum(last7, "checkins")} · Journal entries in 7 days: ${sum(last7, "journals")}</p></div>
+    <div class="card stack"><b>How people felt this week</b>${bars(MOODS.map(m => [m.label, moods[m.k] || 0]).filter(r => r[1] || true), "var(--warm)")}</div>
+    <div class="card stack"><b>Habits people are building</b>${bars(build.slice(0, 10), "var(--done)")}</div>
+    <div class="card stack"><b>Habits people are quitting</b>${bars(quit.slice(0, 10), "var(--quit)")}</div>
+    <div class="card stack"><b>What people want to work on</b>${bars(Object.entries(AREAS).map(([k, a]) => [a.label, (d.areas || {})[k] || 0]))}</div>
+    <div class="card stack"><b>Circles today</b>${bars(d.circles.map(c => [c.name + " (" + c.members + " members)", c.today]))}<p class="small muted">Bars show how many members checked in today.</p></div>
+    <div class="card stack"><b>Badges earned</b>${bars(BADGES.map(b => [b.name, (d.badges || {})["d" + b.days] || 0]).filter(r => r[1]))}</div>
+    <p class="small muted">All numbers are anonymous totals. Nobody's personal habits or journal can be seen here. Habit counts started on ${esc(d.since || "the day insights were added")}.</p>
+    <button class="btn small ghost" data-act="loadInsights">Refresh</button></div>`;
+}
+function cropperView() {
+  const c = S.crop; if (!c) return "";
+  return `<div class="overlay" role="dialog" aria-modal="true" aria-label="Adjust photo"><div class="celebrate card stack">
+    <h2>Adjust your photo</h2><p class="small muted">Drag the photo to move it. Use the slider to zoom.</p>
+    <div id="cropFrame" class="cropframe"><img id="cropImg" src="${c.src}" alt="" draggable="false"></div>
+    <div class="field" style="width:100%"><label for="cropZoom" class="small">Zoom</label><input type="range" id="cropZoom" min="1" max="3" step="0.01" value="${c.zoom}"></div>
+    <button class="btn block" data-act="cropDone">Use this photo</button><button class="btn ghost block" data-act="cropCancel">Cancel</button></div></div>`;
+}
+const CROP_F = 240;
+function applyCrop() {
+  const c = S.crop, img = document.getElementById("cropImg"); if (!c || !img) return;
+  const scale = CROP_F / Math.min(c.w, c.h) * c.zoom, w = c.w * scale, h = c.h * scale;
+  const mx = (w - CROP_F) / 2, my = (h - CROP_F) / 2;
+  c.x = Math.max(-mx, Math.min(mx, c.x)); c.y = Math.max(-my, Math.min(my, c.y));
+  Object.assign(img.style, { width: w + "px", height: h + "px", left: (CROP_F / 2 + c.x - w / 2) + "px", top: (CROP_F / 2 + c.y - h / 2) + "px" });
+  c.scale = scale; c.left = CROP_F / 2 + c.x - w / 2; c.top = CROP_F / 2 + c.y - h / 2;
+}
+function openCropper(src) {
+  const img = new Image();
+  img.onload = () => { S.crop = { src, img, w: img.naturalWidth, h: img.naturalHeight, zoom: 1, x: 0, y: 0 }; render(); applyCrop(); };
+  img.onerror = () => toast("That picture could not be used. Please try another.");
+  img.src = src;
+}
+function fileToDataUrl(file, max = 1400) {
+  return new Promise((resolve, reject) => {
+    const img = new Image(), url = URL.createObjectURL(file);
+    img.onload = () => {
+      const r = Math.min(1, max / Math.max(img.width, img.height)), c = document.createElement("canvas");
+      c.width = Math.round(img.width * r); c.height = Math.round(img.height * r);
+      c.getContext("2d").drawImage(img, 0, 0, c.width, c.height); URL.revokeObjectURL(url); resolve(c.toDataURL("image/jpeg", 0.9));
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("bad image")); };
+    img.src = url;
+  });
+}
 function leadSection() {
   const r = S.request;
   if (r && r.status === "pending") return `<div class="card stack"><b>Your request is waiting for approval</b><p class="small muted">You asked to lead <b>${esc(r.name)}</b>. The Circles team will look at it soon.</p><button class="link" data-act="cancelReq">Withdraw my request</button></div>`;
@@ -876,8 +1041,9 @@ function postCard(c, p, isLead) {
 function render() {
   const v = views[S.view] || views.loading;
   const active = document.activeElement, keepId = active && active.id, keepVal = active && "value" in active ? active.value : null;
-  const drafts = {}; ["checkText", "postText", "joinCode", "newH", "customH", "cName", "cGoal", "rName", "rGoal", "rWhy", "chatText", "pNick", "pJob"].forEach(id => { const el = document.getElementById(id); if (el && el.value) drafts[id] = el.value; });
-  $app.innerHTML = v() + celebration();
+  const drafts = {}; ["checkText", "postText", "joinCode", "newH", "customH", "cName", "cGoal", "rName", "rGoal", "rWhy", "chatText", "pNick", "pJob", "jText"].forEach(id => { const el = document.getElementById(id); if (el && el.value) drafts[id] = el.value; });
+  $app.innerHTML = v() + celebration() + cropperView();
+  if (S.crop) applyCrop();
   Object.entries(drafts).forEach(([id, val]) => { const el = document.getElementById(id); if (el && !el.value) el.value = val; });
   if (keepId) { const el = document.getElementById(keepId); if (el) { if (keepVal !== null && "value" in el) el.value = keepVal; el.focus(); } }
 }
@@ -944,8 +1110,9 @@ const actions = {
     const b = new Date(v + "T00:00"), n = new Date();
     let age = n.getFullYear() - b.getFullYear(); if (n < new Date(n.getFullYear(), b.getMonth(), b.getDate())) age--;
     if (age < 18) return go("too-young");
-    await setDoc(doc(db, "users", S.user.uid), { adult: true, realName: S.user.displayName || "", email: S.user.email || "", circles: [], onboarded: false, createdAt: serverTimestamp() }, { merge: true });
-    S.account = { ...(S.account || {}), adult: true, realName: S.user.displayName || "", circles: [], onboarded: false };
+    await setDoc(doc(db, "users", S.user.uid), { adult: true, realName: S.user.displayName || "", email: S.user.email || "", circles: [], onboarded: false, counted: true, createdAt: serverTimestamp() }, { merge: true });
+    bump(dayDoc(), "signups");
+    S.account = { ...(S.account || {}), adult: true, realName: S.user.displayName || "", circles: [], onboarded: false, counted: true };
     go(S.profile ? "ob-privacy" : "ob-name");
   },
   color(el) { S.ob.nickname = document.getElementById("nick").value; S.ob.color = el.dataset.c; render(); },
@@ -960,7 +1127,7 @@ const actions = {
   },
   privacyOk() { if (pendingInvite) return openPromise(pendingInvite.c, pendingInvite.k); go("ob-areas"); },
   area(el) { const k = el.dataset.k, a = S.ob.areas || []; S.ob.areas = a.includes(k) ? a.filter(x => x !== k) : [...a, k]; render(); },
-  areasNext() { S.ob.suggest = suggestFrom(S.ob.areas || []); go("ob-habits"); },
+  areasNext() { (S.ob.areas || []).forEach(a => bump("areas", a)); S.ob.suggest = suggestFrom(S.ob.areas || []); go("ob-habits"); },
   skipHabits() { go("ob-find"); },
   sugOn(el) { S.ob.suggest[+el.dataset.i].on = el.checked; render(); },
   sugShare(el) { S.ob.suggest[+el.dataset.i].share = el.checked; },
@@ -973,7 +1140,7 @@ const actions = {
     document.querySelectorAll('[data-act="sugSince"]').forEach(i => { S.ob.suggest[+i.dataset.i].since = i.value || T(); });
     const keep = (S.ob.suggest || []).filter(h => h.on);
     let order = Date.now();
-    for (const h of keep) await saveHabit({ id: "h" + uidShort(), name: h.name, type: h.type, private: !h.share, log: {}, slips: [], start: h.type === "quit" ? (h.since || T()) : T(), added: T(), order: order++ });
+    for (const h of keep) await saveHabit({ id: "h" + uidShort(), name: h.name, type: h.type, private: !h.share, log: {}, slips: [], start: h.type === "quit" ? (h.since || T()) : T(), added: T(), order: order++ }, true);
     if ((S.account.circles || []).length) return finishOnboarding();
     go("ob-find");
   },
@@ -1025,12 +1192,16 @@ const actions = {
     const name = document.getElementById("newH").value.trim(); if (!name) return;
     const type = document.querySelector('input[name="newT"]:checked').value, share = document.getElementById("newShare").checked;
     document.getElementById("newH").value = "";
-    await saveHabit({ id: "h" + uidShort(), name, type, private: !share, log: {}, slips: [], start: T(), added: T(), order: Date.now() });
+    await saveHabit({ id: "h" + uidShort(), name, type, private: !share, log: {}, slips: [], start: T(), added: T(), order: Date.now() }, true);
     toast("Habit added");
   },
   async togglePriv(el) { const h = S.habits.find(x => x.id === el.dataset.id); h.private = !h.private; await saveHabit(h); },
   delAsk(el) { S.confirming = "del" + el.dataset.id; render(); },
-  async delHabit(el) { await deleteDoc(doc(db, "users", S.user.uid, "habits", el.dataset.id)); S.confirming = null; scheduleSummary(); },
+  async delHabit(el) {
+    const h = S.habits.find(x => x.id === el.dataset.id);
+    await deleteDoc(doc(db, "users", S.user.uid, "habits", el.dataset.id)); S.confirming = null; scheduleSummary();
+    if (h && S.account.counted) bump("habits", habitKey(h), -1);
+  },
 
   async checkin() {
     const t = document.getElementById("checkText").value.trim();
@@ -1084,7 +1255,8 @@ const actions = {
   async pickPhoto(el) {
     const f = el.files && el.files[0]; if (!f) return;
     if (!f.type.startsWith("image/")) return toast("Please choose a picture.");
-    try { S.ob.prof = { ...(S.ob.prof || {}), photo: await resizeImage(f) }; render(); } catch (e) { toast("That picture could not be used. Please try another."); }
+    try { openCropper(await fileToDataUrl(f)); } catch (e) { toast("That picture could not be used. Please try another."); }
+    el.value = "";
   },
   removePhoto() { S.ob.prof = { ...(S.ob.prof || {}), photo: "" }; render(); },
   async saveProfile() {
@@ -1125,6 +1297,47 @@ const actions = {
   async adminRemovePhoto(el) {
     try { await updateDoc(doc(db, "profiles", el.dataset.uid), { photo: deleteField() }); delete (S.profiles[el.dataset.uid] || {}).photo; render(); toast("Photo removed"); }
     catch (e) { toast("Could not remove the photo."); }
+  },
+  adjustPhoto() { const ph = S.ob.prof && S.ob.prof.photo !== undefined ? S.ob.prof.photo : S.account.photo; if (ph) openCropper(ph); },
+  cropCancel() { S.crop = null; render(); },
+  cropDone() {
+    const c = S.crop; if (!c) return;
+    const out = document.createElement("canvas"); out.width = out.height = 256;
+    const sx = -c.left / c.scale, sy = -c.top / c.scale, sw = CROP_F / c.scale;
+    out.getContext("2d").drawImage(c.img, sx, sy, sw, sw, 0, 0, 256, 256);
+    S.ob.prof = { ...(S.ob.prof || {}), photo: out.toDataURL("image/jpeg", 0.85) }; S.crop = null; render();
+    toast("Looks good. Tap Save profile to keep it.");
+  },
+  async quickMood(el) { await saveJournalEntry({ mood: el.dataset.m }); go("journal"); },
+  pickMood(el) { S.params.mood = el.dataset.m; render(); },
+  async saveJournal() {
+    const text = document.getElementById("jText").value.trim(), e = S.journal.find(x => x.id === T()) || {};
+    const mood = S.params.mood || e.mood || "";
+    if (!text && !mood) return toast("Pick how you feel or write a few words first.");
+    await saveJournalEntry({ mood, text });
+    toast("Saved to your private journal");
+    if (needsCare(text) || mood === "struggling") render();
+  },
+  shareJAsk() { S.confirming = "shareJ"; render(); },
+  async shareJournal() {
+    const e = S.journal.find(x => x.id === T()); if (!e || !e.text) return;
+    const text = (e.mood ? "Feeling " + moodOf(e.mood).label.toLowerCase() + " today. " : "") + e.text;
+    for (const cid of (S.account.circles || [])) {
+      try { await setDoc(doc(db, "circles", cid, "posts", "j" + Date.now() + uidShort()), { uid: S.user.uid, kind: "post", text: text.slice(0, 1000), care: needsCare(text) || e.mood === "struggling", hidden: false, cheers: {}, createdAt: serverTimestamp() }); } catch (err) { console.error(err); }
+    }
+    S.confirming = null; toast("Shared with your Circles"); render();
+  },
+  async loadInsights() {
+    try {
+      const [an, prof, circ] = await Promise.all([getDocs(collection(db, "analytics")), getDocs(collection(db, "profiles")), getDocs(collection(db, "circles"))]);
+      const d = { daily: {}, people: prof.size, circles: [] };
+      an.docs.forEach(x => { if (x.id.startsWith("day-")) d.daily[x.id.slice(4)] = x.data(); else d[x.id] = x.data(); });
+      const keys = Object.keys(d.daily).sort(); d.since = keys[0] ? new Date(keys[0] + "T00:00").toLocaleDateString("en-IN", { day: "numeric", month: "long" }) : "";
+      for (const c of circ.docs) {
+        try { const ms = await getDocs(collection(db, "circles", c.id, "members")); d.circles.push({ name: c.data().name, members: ms.size, today: ms.docs.filter(m => m.data().lastCheckIn === T()).length }); } catch (e) {}
+      }
+      S.params.insights = d; render();
+    } catch (e) { console.error(e); toast("Could not load insights."); }
   },
   closeBadge() { S.celebrate = null; render(); },
   async shareBadge() {
@@ -1285,7 +1498,16 @@ document.addEventListener("click", e => {
   if (el.tagName === "LABEL") return;
   e.preventDefault(); a(el);
 });
+let dragging = null;
+document.addEventListener("pointerdown", e => {
+  if (!S.crop || !e.target.closest("#cropFrame")) return;
+  dragging = { x: e.clientX, y: e.clientY, ox: S.crop.x, oy: S.crop.y }; e.target.closest("#cropFrame").setPointerCapture?.(e.pointerId); e.preventDefault();
+});
+document.addEventListener("pointermove", e => { if (!dragging || !S.crop) return; S.crop.x = dragging.ox + (e.clientX - dragging.x); S.crop.y = dragging.oy + (e.clientY - dragging.y); applyCrop(); });
+document.addEventListener("pointerup", () => { dragging = null; });
+document.addEventListener("pointercancel", () => { dragging = null; });
 document.addEventListener("input", e => {
+  if (e.target.id === "cropZoom" && S.crop) { S.crop.zoom = Number(e.target.value); applyCrop(); return; }
   if (e.target.id === "peopleFilter") { S.params.pf = e.target.value.trim().toLowerCase(); render(); }
 });
 document.addEventListener("change", e => {
