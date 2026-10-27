@@ -33,7 +33,7 @@ service cloud.firestore {
         && request.resource.data.nickname is string
         && request.resource.data.nickname.size() >= 2
         && request.resource.data.nickname.size() <= 24
-        && request.resource.data.keys().hasOnly(['nickname', 'color', 'updatedAt', 'photo', 'profession'])
+        && request.resource.data.keys().hasOnly(['nickname', 'color', 'updatedAt', 'photo', 'profession', 'topBadge'])
         && (!('photo' in request.resource.data) || (request.resource.data.photo is string && request.resource.data.photo.size() < 120000))
         && (!('profession' in request.resource.data) || (request.resource.data.profession is string && request.resource.data.profession.size() <= 60));
       // An admin can remove a profile photo that breaks the Circle promise.

@@ -42,6 +42,7 @@ function tagsFor(uid, circle) {
   const p = S.profiles[uid] || {}, out = [];
   if (circle && circle.leaderUid === uid) out.push('<span class="tag lead">Circle Leader</span>');
   (p.tags || []).forEach(t => out.push(`<span class="tag badge">${esc(t)}</span>`));
+  if (p.topBadge && badgeFor(p.topBadge)) out.push(`<span class="mini-badge" title="${esc(badgeFor(p.topBadge).name)}">${badgeSvg(p.topBadge, true, 16)}<span>${esc(badgeFor(p.topBadge).name)}</span></span>`);
   return out.join("");
 }
 function ago(ts) {
@@ -80,8 +81,84 @@ const doneOn = (h, k) => dayState(h, k) === "y";
 const doneToday = h => doneOn(h, T());
 
 /* ---------------- stats ---------------- */
-const STREAK_MILESTONES = [3, 7, 21, 30, 50, 100, 365];
-const CLEAN_MILESTONES = [1, 7, 30, 60, 90, 180, 365];
+/* ---------------- badges ---------------- */
+const TIERS = { bronze: ["#B8743A", "#E9C7A4"], silver: ["#6E8293", "#D5DEE5"], gold: ["#C38E12", "#F6DF9C"], royal: ["#5B3A9E", "#D8CBF2"] };
+const BADGES = [
+  { days: 1, name: "First Step", tier: "bronze", line: "You showed up. Every journey starts here." },
+  { days: 3, name: "Spark", tier: "bronze", line: "Three days in a row. Something is catching fire." },
+  { days: 7, name: "One Week Strong", tier: "bronze", line: "A whole week. You are proving you can do this." },
+  { days: 21, name: "Rooted", tier: "silver", line: "Twenty one days. This is becoming part of who you are." },
+  { days: 30, name: "Faithful Month", tier: "silver", line: "A full month of faithfulness. That takes real strength." },
+  { days: 60, name: "Steady Flame", tier: "gold", line: "Sixty days. Your fire keeps burning, day after day." },
+  { days: 90, name: "Overcomer", tier: "gold", line: "Ninety days. You have climbed a mountain many never start." },
+  { days: 180, name: "Unshaken", tier: "royal", line: "Half a year. Storms came and you stood firm." },
+  { days: 365, name: "Full Circle", tier: "royal", line: "One whole year. You have come full circle." },
+];
+const ICONS = {
+  1: '<ellipse cx="9" cy="8" rx="3" ry="4.4"/><ellipse cx="15.5" cy="15.5" rx="3" ry="4.4"/>',
+  3: '<path d="M12 2l2.6 7.4L22 12l-7.4 2.6L12 22l-2.6-7.4L2 12l7.4-2.6z"/>',
+  7: '<text x="12" y="19" text-anchor="middle" font-size="18" font-weight="800" font-family="Bricolage Grotesque, system-ui, sans-serif">7</text>',
+  21: '<path d="M11 22V12C11 7 7.5 4.5 3 4.5c0 5 3.5 7.5 8 7.5zM13 14c0-5 3.5-7.5 8-7.5 0 5-3.5 7.5-8 7.5zM11 22h2V13h-2z"/>',
+  30: '<text x="12" y="18" text-anchor="middle" font-size="14" font-weight="800" font-family="Bricolage Grotesque, system-ui, sans-serif">30</text>',
+  60: '<path d="M12 2c1 4.5 6.5 6.5 6.5 12.5a6.5 6.5 0 0 1-13 0c0-3.3 2-5.5 3.3-7.5.2 2.2 1.2 3.4 2.4 3.6-.3-3.4-.6-5.6.8-8.6z"/>',
+  90: '<path d="M1.5 20.5L9 7.5l4 6.5 3-4.5 6.5 11z"/><path d="M9 7.5l2.2 3.6L9 10.2l-1.6 1.5z" opacity=".55"/>',
+  180: '<path d="M12 3a2.3 2.3 0 1 1 0 4.6A2.3 2.3 0 0 1 12 3zm-1 4.4h2V20c3-.4 5.4-2.4 6-5.3l-2 .4 3-4 2 4.5-1.8-.3C19.3 19.6 16 22 12 22s-7.3-2.4-8.2-6.7L2 15.6l2-4.5 3 4-2-.4c.6 2.9 3 4.9 6 5.3zM8 9.5h8v2H8z"/>',
+  365: '<path d="M3 18L4.6 7l4.6 4.6L12 4.5l2.8 7.1L19.4 7 21 18z"/><rect x="3" y="19" width="18" height="2.4" rx="1"/>',
+};
+function badgeSvg(days, earned = true, size = 64) {
+  const b = BADGES.find(x => x.days === days) || BADGES[0];
+  const [dark, light] = earned ? TIERS[b.tier] : ["#B9C4C0", "#E6ECEA"];
+  return `<svg width="${size}" height="${Math.round(size * 1.15)}" viewBox="0 0 64 74" role="img" aria-label="${esc(b.name)} badge${earned ? "" : ", not earned yet"}">
+    <path d="M18 46l-6 26 11-6 6 8 5-24z" fill="${dark}" opacity=".85"/><path d="M46 46l6 26-11-6-6 8-5-24z" fill="${dark}" opacity=".85"/>
+    <circle cx="32" cy="30" r="28" fill="${dark}"/><circle cx="32" cy="30" r="23" fill="${light}"/>
+    <circle cx="32" cy="30" r="23" fill="none" stroke="${dark}" stroke-width="1.2" stroke-dasharray="2 3" opacity=".6"/>
+    <g transform="translate(17 15) scale(1.25)" fill="${dark}">${ICONS[days] || ""}</g></svg>`;
+}
+const badgeFor = d => BADGES.find(b => b.days === d);
+const STREAK_MILESTONES = BADGES.map(b => b.days);
+const CLEAN_MILESTONES = BADGES.map(b => b.days);
+// Days that count towards badges: only time since the habit was added to Circles, so nobody earns a badge on day one.
+function badgeRun(h) {
+  if (h.type === "build") return bestStreak(h);
+  const from = h.added && h.added > (h.start || "") ? h.added : h.start;
+  return longestClean({ ...h, start: from, slips: (h.slips || []).filter(k => k >= from) });
+}
+function earnedFor(h) { const run = badgeRun(h); return BADGES.filter(b => run >= b.days); }
+let badgeSaving = false;
+async function checkBadges() {
+  if (!S.account || !S.user || badgeSaving) return;
+  const have = S.account.earned || {}, fresh = [];
+  S.habits.forEach(h => earnedFor(h).forEach(b => { const k = h.id + "_" + b.days; if (!have[k]) fresh.push({ k, b, h }); }));
+  if (!fresh.length) return;
+  badgeSaving = true;
+  const upd = {}; fresh.forEach(f => { upd["earned." + f.k] = { d: T(), n: f.b.days, h: f.h.name, p: !!f.h.private }; });
+  try {
+    await updateDoc(doc(db, "users", S.user.uid), upd);
+    S.account.earned = { ...have }; fresh.forEach(f => { S.account.earned[f.k] = upd["earned." + f.k]; });
+    const top = Math.max(...Object.values(S.account.earned).map(e => e.n));
+    if (S.profile && S.profile.topBadge !== top) { try { await updateDoc(doc(db, "profiles", S.user.uid), { topBadge: top }); S.profile.topBadge = top; } catch (e) {} }
+    const best = fresh.sort((a, b) => b.b.days - a.b.days)[0];
+    S.celebrate = best; render();
+  } catch (e) { console.error(e); }
+  badgeSaving = false;
+}
+function celebration() {
+  const c = S.celebrate; if (!c) return "";
+  const shareable = (S.account.circles || []).length;
+  return `<div class="overlay" role="dialog" aria-modal="true" aria-label="Badge earned"><div class="celebrate card stack">
+    <p class="label">Badge earned</p><div class="pop">${badgeSvg(c.b.days, true, 140)}</div>
+    <h1>${esc(c.b.name)}</h1><p><b>${c.b.days} ${c.b.days === 1 ? "day" : "days"}</b> · ${esc(c.h.name)}</p><p class="muted">${esc(c.b.line)}</p>
+    ${shareable ? `<button class="btn block" data-act="shareBadge">Share with my Circles</button><p class="small muted">${c.h.private ? "Your Circles will see the badge, not the name of this private habit." : "Your Circles will see the badge and the habit name."}</p>` : ""}
+    <button class="btn ghost block" data-act="closeBadge">${shareable ? "Not now" : "Thank you"}</button></div></div>`;
+}
+function myBadges() {
+  const list = Object.values(S.account.earned || {});
+  const byDays = {}; list.forEach(e => { byDays[e.n] = (byDays[e.n] || 0) + 1; });
+  return BADGES.map(b => ({ b, count: byDays[b.days] || 0 }));
+}
+function badgeShelf(size = 56) {
+  return `<div class="shelf">${myBadges().map(({ b, count }) => `<div class="shelf-item ${count ? "" : "locked"}">${badgeSvg(b.days, !!count, size)}<b>${esc(b.name)}</b><span>${b.days} ${b.days === 1 ? "day" : "days"}${count > 1 ? " · ×" + count : ""}</span></div>`).join("")}</div>`;
+}
 function weekStart(d) { const x = new Date(d); x.setHours(0, 0, 0, 0); x.setDate(x.getDate() - ((x.getDay() + 6) % 7)); return x; }
 function daysIn(from, n) { const out = []; for (let i = 0; i < n; i++) { const k = ds(addDays(from, i)); if (k <= T()) out.push(k); } return out; }
 function bestStreak(h) {
@@ -210,6 +287,7 @@ function watchMine() {
   S.subs.push(onSnapshot(collection(db, "users", uid, "habits"), snap => {
     S.habits = snap.docs.map(d => ({ id: d.id, ...d.data() })).sort((a, b) => (a.order || 0) - (b.order || 0));
     if (["today", "me", "stats"].includes(S.view)) render();
+    checkBadges();
   }));
   S.subs.push(onSnapshot(doc(db, "circleRequests", uid), snap => {
     S.request = snap.exists() ? snap.data() : null;
@@ -510,6 +588,7 @@ const views = {
         <div class="field"><label for="pJob">Profession (optional)</label><input type="text" id="pJob" maxlength="60" value="${esc(a.profession || "")}" placeholder="For example: Teacher, Software engineer, Student">
           ${vis("pJobVis", a.professionPublic)}</div>
         <button class="btn" data-act="saveProfile">Save profile</button></div></section>
+      <section class="stack"><div class="row" style="justify-content:space-between"><h2>Your badges</h2><button class="link" data-act="nav" data-v="stats">See your stats</button></div><div class="card">${badgeShelf(48)}</div></section>
       <section class="stack"><div class="row" style="justify-content:space-between"><h2>Your habits</h2><button class="link" data-act="nav" data-v="stats">See your stats</button></div>${S.habits.map(h => `<div class="card habit"><div><div class="hname">${esc(h.name)}<span class="tag ${h.type}">${h.type === "build" ? "Build" : "Quit"}</span>${h.private ? '<span class="tag priv">Private</span>' : ""}</div></div>
           <div class="hactions"><button class="link" data-act="togglePriv" data-id="${esc(h.id)}">${h.private ? "Share with my Circles" : "Make private"}</button><button class="link" data-act="delAsk" data-id="${esc(h.id)}">Remove</button></div>
           ${S.confirming === "del" + h.id ? `<div class="confirm">Remove this habit and all its history?<button class="btn small danger" data-act="delHabit" data-id="${esc(h.id)}">Remove</button><button class="btn small ghost" data-act="cancel">Keep it</button></div>` : ""}</div>`).join("")}
@@ -553,9 +632,14 @@ const views = {
           <div class="bar"><i style="width:${pct}%;${h.type === "quit" ? "background:var(--accent)" : ""}"></i></div>
           <span class="small muted">${h.type === "build" ? `Done ${hs.kept} of ${hs.elig} days · current streak ${streak(h)} · best ever ${bestStreak(h)}` : `Checked in clean ${hs.kept} of ${hs.elig} days${hs.slips ? " · " + hs.slips + (hs.slips === 1 ? " slip" : " slips") : ""} · ${cleanDays(h)} days clean now · best ever ${longestClean(h)}`}</span></div>`;
       }).join("") : `<div class="empty">No habits yet.</div>`}</section>
-      <section class="stack"><h2>Achievements</h2>${ach.map(a => `<div class="card stack" style="gap:8px"><b>${esc(a.h.name)}</b>
-          <div class="chips">${a.earned.length ? a.earned.map(m => `<span class="chip ok">${m} ${m === 1 && a.unit === "days clean" ? "day clean" : a.unit}</span>`).join("") : `<span class="chip">No milestones yet</span>`}</div>
-          ${a.next ? `<span class="small muted">Next: ${a.next} ${a.unit}. ${a.next - a.now} more to go.</span>` : `<span class="small" style="color:var(--done)">Every milestone reached. Amazing.</span>`}</div>`).join("")}</section>
+      <section class="stack"><h2>Your badges</h2><p class="small muted">Earn a badge each time you keep a habit for 1, 3, 7, 21, 30, 60, 90, 180 and 365 days in a row. Grey badges are still waiting for you.</p>
+        <div class="card">${badgeShelf()}</div></section>
+      <section class="stack"><h2>Next badge for each habit</h2>${ach.map(a => {
+        const run = badgeRun(a.h), nb = BADGES.find(b => run < b.days), cur = a.h.type === "build" ? streak(a.h) : run;
+        const lastB = earnedFor(a.h).pop();
+        return `<div class="card row" style="flex-wrap:nowrap;align-items:center">${badgeSvg(nb ? nb.days : 365, !nb, 48)}<div style="min-width:0"><b>${esc(a.h.name)}</b>
+          <p class="small muted">${nb ? `Next: <b>${esc(nb.name)}</b> at ${nb.days} ${nb.days === 1 ? "day" : "days"}. ${Math.max(0, nb.days - cur)} more to go.` : "Every badge earned. Amazing."}${lastB ? ` Latest: ${esc(lastB.name)}.` : ""}</p></div></div>`;
+      }).join("")}</section>
     </div>${nav()}`;
   },
 
@@ -778,6 +862,7 @@ function postCard(c, p, isLead) {
     ${p.hidden ? `<p class="small muted">Hidden by the Circle leader. Only leaders can see this.</p>` : ""}
     ${p.care && isLead ? `<p class="small" style="color:var(--warm)"><b>This person may need care.</b> Please reach out to them gently.</p>` : ""}
     ${p.text ? `<p class="post-text">${esc(p.text)}</p>` : ""}
+    ${p.kind === "badge" && badgeFor(p.badge) ? `<div class="row" style="flex-wrap:nowrap">${badgeSvg(p.badge, true, 56)}<div><b>${esc(badgeFor(p.badge).name)}</b><p class="small muted">${p.badge} days in a row</p></div></div>` : ""}
     ${p.kind === "checkin" && p.total ? `<div class="chips"><span class="chip ok">${p.done} of ${p.total} ${p.total === 1 ? "habit" : "habits"} done</span></div>` : ""}
     <div class="row" style="justify-content:space-between">
       <button class="cheer ${mine ? "on" : ""}" data-act="cheer" data-pid="${esc(p.id)}" aria-pressed="${mine}">${mine ? "Cheered" : "Cheer"}${cheers.length ? " · " + cheers.length : ""}</button>
@@ -792,7 +877,7 @@ function render() {
   const v = views[S.view] || views.loading;
   const active = document.activeElement, keepId = active && active.id, keepVal = active && "value" in active ? active.value : null;
   const drafts = {}; ["checkText", "postText", "joinCode", "newH", "customH", "cName", "cGoal", "rName", "rGoal", "rWhy", "chatText", "pNick", "pJob"].forEach(id => { const el = document.getElementById(id); if (el && el.value) drafts[id] = el.value; });
-  $app.innerHTML = v();
+  $app.innerHTML = v() + celebration();
   Object.entries(drafts).forEach(([id, val]) => { const el = document.getElementById(id); if (el && !el.value) el.value = val; });
   if (keepId) { const el = document.getElementById(keepId); if (el) { if (keepVal !== null && "value" in el) el.value = keepVal; el.focus(); } }
 }
@@ -888,7 +973,7 @@ const actions = {
     document.querySelectorAll('[data-act="sugSince"]').forEach(i => { S.ob.suggest[+i.dataset.i].since = i.value || T(); });
     const keep = (S.ob.suggest || []).filter(h => h.on);
     let order = Date.now();
-    for (const h of keep) await saveHabit({ id: "h" + uidShort(), name: h.name, type: h.type, private: !h.share, log: {}, slips: [], start: h.type === "quit" ? (h.since || T()) : T(), order: order++ });
+    for (const h of keep) await saveHabit({ id: "h" + uidShort(), name: h.name, type: h.type, private: !h.share, log: {}, slips: [], start: h.type === "quit" ? (h.since || T()) : T(), added: T(), order: order++ });
     if ((S.account.circles || []).length) return finishOnboarding();
     go("ob-find");
   },
@@ -940,7 +1025,7 @@ const actions = {
     const name = document.getElementById("newH").value.trim(); if (!name) return;
     const type = document.querySelector('input[name="newT"]:checked').value, share = document.getElementById("newShare").checked;
     document.getElementById("newH").value = "";
-    await saveHabit({ id: "h" + uidShort(), name, type, private: !share, log: {}, slips: [], start: T(), order: Date.now() });
+    await saveHabit({ id: "h" + uidShort(), name, type, private: !share, log: {}, slips: [], start: T(), added: T(), order: Date.now() });
     toast("Habit added");
   },
   async togglePriv(el) { const h = S.habits.find(x => x.id === el.dataset.id); h.private = !h.private; await saveHabit(h); },
@@ -1011,6 +1096,7 @@ const actions = {
     const prof = { nickname: nick, color: (S.profile && S.profile.color) || COLORS[0], updatedAt: serverTimestamp() };
     if (photo && photoPublic) prof.photo = photo;
     if (job && professionPublic) prof.profession = job;
+    if (S.profile && S.profile.topBadge) prof.topBadge = S.profile.topBadge;
     try {
       await setDoc(doc(db, "profiles", S.user.uid), prof);
       await updateDoc(doc(db, "users", S.user.uid), { photo, profession: job, photoPublic, professionPublic });
@@ -1039,6 +1125,15 @@ const actions = {
   async adminRemovePhoto(el) {
     try { await updateDoc(doc(db, "profiles", el.dataset.uid), { photo: deleteField() }); delete (S.profiles[el.dataset.uid] || {}).photo; render(); toast("Photo removed"); }
     catch (e) { toast("Could not remove the photo."); }
+  },
+  closeBadge() { S.celebrate = null; render(); },
+  async shareBadge() {
+    const c = S.celebrate; S.celebrate = null; render();
+    const text = "Earned the " + c.b.name + " badge" + (c.h.private ? "" : " for " + c.h.name) + ".";
+    for (const cid of (S.account.circles || [])) {
+      try { await setDoc(doc(db, "circles", cid, "posts", "b" + Date.now() + uidShort()), { uid: S.user.uid, kind: "badge", badge: c.b.days, text, care: false, hidden: false, cheers: {}, createdAt: serverTimestamp() }); } catch (e) { console.error(e); }
+    }
+    toast("Shared with your Circles");
   },
   statsRange(el) { S.params.range = el.dataset.r; render(); },
   openBuddy(el) { go("buddy", { pid: el.dataset.pid }); },
