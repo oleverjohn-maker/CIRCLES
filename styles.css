@@ -140,3 +140,4 @@ details[open] summary{margin-bottom:8px}
 a.btn{text-decoration:none}
 .tag.badge{background:color-mix(in srgb,var(--warm) 18%,transparent);color:var(--warm)}
 img.av{display:block}
+.week span.u i{background:color-mix(in srgb,var(--done) 28%,var(--soft))}

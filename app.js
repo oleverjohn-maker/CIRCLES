@@ -65,13 +65,44 @@ function streak(h) {
   while (log[ds(d)]) { n++; d = addDays(d, -1); } return n;
 }
 function cleanDays(h) { const last = (h.slips || []).slice().sort().pop(); return Math.max(0, daysBetween(last || h.start, T())); }
+function dayState(h, k) {
+  if (h.type === "build") return (h.log || {})[k] ? "y" : "";
+  if ((h.slips || []).includes(k)) return "s";
+  if ((h.cleanLog || {})[k]) return "y";
+  return k >= h.start && k <= T() ? "u" : "";
+}
 function weekStates(h) {
   const out = [];
-  for (let i = 6; i >= 0; i--) {
-    const k = ds(addDays(todayDate(), -i));
-    out.push(h.type === "build" ? ((h.log || {})[k] ? "y" : "") : ((h.slips || []).includes(k) ? "s" : (k >= h.start ? "y" : "")));
-  }
+  for (let i = 6; i >= 0; i--) out.push(dayState(h, ds(addDays(todayDate(), -i))));
   return out;
+}
+const doneOn = (h, k) => dayState(h, k) === "y";
+const doneToday = h => doneOn(h, T());
+
+/* ---------------- stats ---------------- */
+const STREAK_MILESTONES = [3, 7, 21, 30, 50, 100, 365];
+const CLEAN_MILESTONES = [1, 7, 30, 60, 90, 180, 365];
+function weekStart(d) { const x = new Date(d); x.setHours(0, 0, 0, 0); x.setDate(x.getDate() - ((x.getDay() + 6) % 7)); return x; }
+function daysIn(from, n) { const out = []; for (let i = 0; i < n; i++) { const k = ds(addDays(from, i)); if (k <= T()) out.push(k); } return out; }
+function bestStreak(h) {
+  const keys = Object.keys(h.log || {}).sort(); let best = 0, run = 0, prev = null;
+  keys.forEach(k => { run = prev && daysBetween(prev, k) === 1 ? run + 1 : 1; best = Math.max(best, run); prev = k; });
+  return best;
+}
+function longestClean(h) {
+  const pts = [h.start, ...(h.slips || []).slice().sort(), T()]; let m = 0;
+  for (let i = 1; i < pts.length; i++) m = Math.max(m, daysBetween(pts[i - 1], pts[i]));
+  return m;
+}
+function habitStats(h, days) {
+  const elig = days.filter(k => k >= (h.start || "0") || (h.type === "build" && (h.log || {})[k]));
+  return { elig: elig.length, kept: elig.filter(k => doneOn(h, k)).length, slips: days.filter(k => (h.slips || []).includes(k)).length };
+}
+function rangeStats(days) {
+  let elig = 0, kept = 0, slips = 0;
+  S.habits.forEach(h => { const st = habitStats(h, days); elig += st.elig; kept += st.kept; slips += st.slips; });
+  const checkins = days.filter(k => (S.account.checkins || {})[k]).length;
+  return { elig, kept, slips, pct: elig ? Math.round(kept / elig * 100) : 0, checkins, days: days.length };
 }
 
 /* ---------------- Bible reading plans ---------------- */
@@ -178,7 +209,7 @@ function watchMine() {
   const uid = S.user.uid;
   S.subs.push(onSnapshot(collection(db, "users", uid, "habits"), snap => {
     S.habits = snap.docs.map(d => ({ id: d.id, ...d.data() })).sort((a, b) => (a.order || 0) - (b.order || 0));
-    if (["today", "me"].includes(S.view)) render();
+    if (["today", "me", "stats"].includes(S.view)) render();
   }));
   S.subs.push(onSnapshot(doc(db, "circleRequests", uid), snap => {
     S.request = snap.exists() ? snap.data() : null;
@@ -249,7 +280,7 @@ function summaryFor() {
     date: T(),
     shared: shared.map(h => h.type === "build"
       ? { name: h.name, type: "build", done: !!(h.log || {})[T()], streak: streak(h) }
-      : { name: h.name, type: "quit", clean: cleanDays(h) }),
+      : { name: h.name, type: "quit", clean: cleanDays(h), done: doneToday(h) }),
   };
 }
 let sumTimer = null;
@@ -281,7 +312,8 @@ async function postCheckin(text) {
       await updateDoc(doc(db, "circles", cid, "members", S.user.uid), { summary: s, lastCheckIn: T(), active: serverTimestamp() });
     } catch (e) { console.error(e); }
   }
-  await updateDoc(doc(db, "users", S.user.uid), { lastCheckIn: T(), lastNote: text });
+  await updateDoc(doc(db, "users", S.user.uid), { lastCheckIn: T(), lastNote: text, ["checkins." + T()]: true });
+  S.account.checkins = { ...(S.account.checkins || {}), [T()]: true };
   return care;
 }
 
@@ -397,7 +429,8 @@ const views = {
   },
 
   today: () => {
-    const hs = S.habits, builds = hs.filter(h => h.type === "build"), done = builds.filter(h => (h.log || {})[T()]).length;
+    const hs = S.habits, builds = hs, done = hs.filter(doneToday).length;
+    const wk = rangeStats(daysIn(weekStart(todayDate()), 7)), lastWk = rangeStats(daysIn(addDays(weekStart(todayDate()), -7), 7));
     const name = (S.profile && S.profile.nickname) || "friend";
     const checked = S.account && S.account.lastCheckIn === T();
     const nudges = S.nudges.filter(n => Date.now() - tsOf(n.createdAt) < 3 * 864e5).sort((a, b) => tsOf(b.createdAt) - tsOf(a.createdAt));
@@ -405,10 +438,15 @@ const views = {
     return `<div class="stack-lg">
       <div class="stack"><p class="label">${todayDate().toLocaleDateString("en-IN", { weekday: "long", day: "numeric", month: "long" })}</p>
         <h1>Hello, ${esc(name)}</h1>
-        <div class="row" style="flex-wrap:nowrap"><div class="bar" style="flex:1"><i style="width:${builds.length ? done / builds.length * 100 : 0}%"></i></div><b>${done} of ${builds.length}</b></div></div>
+        <div class="row" style="flex-wrap:nowrap"><div class="bar" style="flex:1"><i style="width:${builds.length ? done / builds.length * 100 : 0}%"></i></div><b>${done} of ${builds.length}</b></div><p class="small muted">${builds.length ? (done === builds.length ? "Everything done for today. Well done." : "habits kept today") : "Add a habit to get started"}</p></div>
       ${nudges.length ? `<div class="inbox">${nudges.slice(0, 5).map(n => `<div class="note">${avatar(S.profiles[n.from], "sm")}<div><b>${esc((S.profiles[n.from] || {}).nickname || "Someone")}</b> ${n.kind === "cheer" ? "is cheering you on" : "sent you a gentle nudge"}<p class="small muted">${ago(tsOf(n.createdAt))}</p></div><button class="link" data-act="dismissNudge" data-cid="${esc(n.cid)}" data-id="${esc(n.id)}" aria-label="Dismiss">Dismiss</button></div>`).join("")}</div>` : ""}
       ${S.buddyIn.length || S.buddies.some(unread) ? `<div class="inbox">${S.buddyIn.map(r => `<div class="note">${avatar(S.profiles[r.from], "sm")}<div><b>${esc((S.profiles[r.from] || {}).nickname || "Someone")}</b> wants to be your buddy</div><button class="btn small" data-act="nav" data-v="friends">See</button></div>`).join("")}${S.buddies.filter(unread).map(b => `<div class="note">${avatar(S.profiles[otherOf(b)], "sm")}<div><b>${esc((S.profiles[otherOf(b)] || {}).nickname || "Your buddy")}</b> sent you a message</div><button class="btn small" data-act="openBuddy" data-pid="${esc(b.id)}">Open</button></div>`).join("")}</div>` : ""}
       <section class="stack"><h2>Today's habits</h2>${hs.length ? hs.map(habitCard).join("") : `<div class="empty">You have no habits yet.<button class="btn small" data-act="nav" data-v="me">Add a habit</button></div>`}</section>
+      ${hs.length ? `<section class="stack"><h2>Your week so far</h2><button class="card circle-card" data-act="nav" data-v="stats">
+        <div class="row" style="flex-wrap:nowrap"><div class="bar" style="flex:1"><i style="width:${wk.pct}%"></i></div><b>${wk.pct}%</b></div>
+        <span class="small">${wk.kept} of ${wk.elig} habit days kept · checked in ${wk.checkins} of ${wk.days} days${wk.slips ? " · " + wk.slips + (wk.slips === 1 ? " slip" : " slips") : ""}</span>
+        ${lastWk.elig ? `<span class="small muted">Last week: ${lastWk.pct}% of habit days kept</span>` : ""}
+        <span class="small" style="color:var(--accent);font-weight:700">See all your stats and achievements ›</span></button></section>` : ""}
       ${(S.account.circles || []).length ? `<section class="stack"><h2>Your check in</h2>
         <div class="card stack">${checked ? `<p class="small muted">You checked in today. You can update it.</p>` : `<p class="small muted">Write one line about your day. Your Circle will see it with your shared habits.</p>`}
           <textarea id="checkText" maxlength="500" placeholder="For example: Went to the gym and read two chapters.">${esc(checked ? S.account.lastNote || "" : "")}</textarea>
@@ -472,7 +510,7 @@ const views = {
         <div class="field"><label for="pJob">Profession (optional)</label><input type="text" id="pJob" maxlength="60" value="${esc(a.profession || "")}" placeholder="For example: Teacher, Software engineer, Student">
           ${vis("pJobVis", a.professionPublic)}</div>
         <button class="btn" data-act="saveProfile">Save profile</button></div></section>
-      <section class="stack"><h2>Your habits</h2>${S.habits.map(h => `<div class="card habit"><div><div class="hname">${esc(h.name)}<span class="tag ${h.type}">${h.type === "build" ? "Build" : "Quit"}</span>${h.private ? '<span class="tag priv">Private</span>' : ""}</div></div>
+      <section class="stack"><div class="row" style="justify-content:space-between"><h2>Your habits</h2><button class="link" data-act="nav" data-v="stats">See your stats</button></div>${S.habits.map(h => `<div class="card habit"><div><div class="hname">${esc(h.name)}<span class="tag ${h.type}">${h.type === "build" ? "Build" : "Quit"}</span>${h.private ? '<span class="tag priv">Private</span>' : ""}</div></div>
           <div class="hactions"><button class="link" data-act="togglePriv" data-id="${esc(h.id)}">${h.private ? "Share with my Circles" : "Make private"}</button><button class="link" data-act="delAsk" data-id="${esc(h.id)}">Remove</button></div>
           ${S.confirming === "del" + h.id ? `<div class="confirm">Remove this habit and all its history?<button class="btn small danger" data-act="delHabit" data-id="${esc(h.id)}">Remove</button><button class="btn small ghost" data-act="cancel">Keep it</button></div>` : ""}</div>`).join("")}
         <div class="card stack"><div class="field"><label for="newH">Add a habit</label><input type="text" id="newH" maxlength="60" placeholder="For example: Read 10 pages"></div>
@@ -487,6 +525,37 @@ const views = {
       <section class="stack"><h2>Need to talk to someone?</h2><div class="care-card"><p>If you are having thoughts of hurting yourself, please call <b>Tele MANAS on 14416</b>. It is free and open day and night. In an emergency, call <b>112</b>.</p></div></section>
       <section class="stack"><h2>About this test</h2><p class="small muted">This is a test version of Circles. Your data may be reset when the test ends. Circles offers support from people who care. It does not replace a doctor or counsellor.</p>
         <button class="btn ghost" data-act="signout">Sign out</button></section>
+    </div>${nav()}`;
+  },
+
+  stats: () => {
+    const r = S.params.range || "week", ws = weekStart(todayDate());
+    const days = r === "week" ? daysIn(ws, 7) : r === "last" ? daysIn(addDays(ws, -7), 7) : daysIn(addDays(todayDate(), -27), 28);
+    const st = rangeStats(days), label = r === "week" ? "This week" : r === "last" ? "Last week" : "Last 4 weeks";
+    const tile = (big, small) => `<div class="card" style="padding:14px"><b style="font-family:var(--display);font-size:1.6rem;display:block">${big}</b><span class="small muted">${small}</span></div>`;
+    const ach = [];
+    S.habits.forEach(h => {
+      const best = h.type === "build" ? bestStreak(h) : longestClean(h), now = h.type === "build" ? streak(h) : cleanDays(h);
+      const ms = h.type === "build" ? STREAK_MILESTONES : CLEAN_MILESTONES, unit = h.type === "build" ? "day streak" : "days clean";
+      const earned = ms.filter(m => best >= m), next = ms.find(m => now < m);
+      ach.push({ h, earned, next, now, unit, best });
+    });
+    return `<div class="stack-lg"><div class="stack"><button class="back" data-act="nav" data-v="today">‹ Today</button><h1>Your stats</h1></div>
+      <div class="row">${[["week", "This week"], ["last", "Last week"], ["month", "Last 4 weeks"]].map(([k, l]) => `<button class="btn small ${r === k ? "" : "ghost"}" data-act="statsRange" data-r="${k}">${l}</button>`).join("")}</div>
+      <section class="stack"><h2>${label}</h2>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+          ${tile(st.pct + "%", "of habit days kept")}${tile(st.kept + " of " + st.elig, "habit days kept")}
+          ${tile(st.checkins + " of " + st.days, "days you checked in")}${tile(st.slips, st.slips === 1 ? "slip, and you kept going" : "slips")}
+        </div></section>
+      <section class="stack"><h2>Each habit</h2>${S.habits.length ? S.habits.map(h => {
+        const hs = habitStats(h, days), pct = hs.elig ? Math.round(hs.kept / hs.elig * 100) : 0;
+        return `<div class="card stack" style="gap:8px"><div class="row" style="justify-content:space-between"><b>${esc(h.name)}<span class="tag ${h.type}">${h.type === "build" ? "Build" : "Quit"}</span></b><b>${pct}%</b></div>
+          <div class="bar"><i style="width:${pct}%;${h.type === "quit" ? "background:var(--accent)" : ""}"></i></div>
+          <span class="small muted">${h.type === "build" ? `Done ${hs.kept} of ${hs.elig} days · current streak ${streak(h)} · best ever ${bestStreak(h)}` : `Checked in clean ${hs.kept} of ${hs.elig} days${hs.slips ? " · " + hs.slips + (hs.slips === 1 ? " slip" : " slips") : ""} · ${cleanDays(h)} days clean now · best ever ${longestClean(h)}`}</span></div>`;
+      }).join("") : `<div class="empty">No habits yet.</div>`}</section>
+      <section class="stack"><h2>Achievements</h2>${ach.map(a => `<div class="card stack" style="gap:8px"><b>${esc(a.h.name)}</b>
+          <div class="chips">${a.earned.length ? a.earned.map(m => `<span class="chip ok">${m} ${m === 1 && a.unit === "days clean" ? "day clean" : a.unit}</span>`).join("") : `<span class="chip">No milestones yet</span>`}</div>
+          ${a.next ? `<span class="small muted">Next: ${a.next} ${a.unit}. ${a.next - a.now} more to go.</span>` : `<span class="small" style="color:var(--done)">Every milestone reached. Amazing.</span>`}</div>`).join("")}</section>
     </div>${nav()}`;
   },
 
@@ -684,10 +753,12 @@ function habitCard(h) {
     return `<div class="card habit"><div><div class="hname">${esc(h.name)}${tags}</div><p class="small muted">${streak(h)} day streak${on ? " · done today" : ""}</p></div>
       <button class="check ${on ? "on" : ""}" data-act="tick" data-id="${esc(h.id)}" aria-pressed="${on}" aria-label="Mark ${esc(h.name)} done today">${tickSvg}</button>${week}</div>`;
   }
-  const c = cleanDays(h);
-  return `<div class="card habit"><div><div class="hname">${esc(h.name)}${tags}</div></div>
+  const c = cleanDays(h), slipped = (h.slips || []).includes(T()), ok = doneToday(h);
+  return `<div class="card habit"><div><div class="hname">${esc(h.name)}${tags}</div>${ok ? `<p class="small" style="color:var(--done);font-weight:600">Checked in clean today</p>` : ""}</div>
     <div class="clean"><b>${c}</b><span class="small muted">${c === 1 ? "day" : "days"} clean</span></div>${week}
-    <div class="hactions"><button class="btn small ghost" data-act="slipAsk" data-id="${esc(h.id)}">I slipped today</button></div>
+    <div class="hactions">${slipped
+      ? `<p class="small">You slipped today. That is okay. Tomorrow is a new day.</p><button class="link" data-act="unslip" data-id="${esc(h.id)}">Undo</button>`
+      : `<button class="btn small ${ok ? "" : "warm"}" data-act="cleanToday" data-id="${esc(h.id)}" aria-pressed="${ok}">${ok ? "✓ Stayed clean today" : "I stayed clean today"}</button><button class="btn small ghost" data-act="slipAsk" data-id="${esc(h.id)}">I slipped today</button>`}</div>
     ${conf ? `<div class="confirm">That is okay. Your counter starts again from today. Keep going.<button class="btn small" data-act="slip" data-id="${esc(h.id)}">Start again</button><button class="btn small ghost" data-act="cancel">Cancel</button></div>` : ""}</div>`;
 }
 function memberPanel(c, m, isLead) {
@@ -852,9 +923,17 @@ const actions = {
     if (log[T()]) delete log[T()]; else log[T()] = true;
     h.log = log; render(); await saveHabit(h);
   },
+  async cleanToday(el) {
+    const h = S.habits.find(x => x.id === el.dataset.id), cl = { ...(h.cleanLog || {}) };
+    if (cl[T()]) delete cl[T()]; else cl[T()] = true;
+    h.cleanLog = cl; render(); await saveHabit(h);
+    if (cl[T()]) toast(cleanDays(h) > 0 ? "Another clean day. Keep going." : "Day one done. Keep going.");
+  },
+  async unslip(el) { const h = S.habits.find(x => x.id === el.dataset.id); h.slips = (h.slips || []).filter(k => k !== T()); render(); await saveHabit(h); },
   slipAsk(el) { S.confirming = "slip" + el.dataset.id; render(); },
   async slip(el) {
     const h = S.habits.find(x => x.id === el.dataset.id); h.slips = [...new Set([...(h.slips || []), T()])];
+    if (h.cleanLog && h.cleanLog[T()]) { h.cleanLog = { ...h.cleanLog }; delete h.cleanLog[T()]; }
     S.confirming = null; render(); await saveHabit(h); toast("Day one starts now. You can do this.");
   },
   async addHabit() {
@@ -961,6 +1040,7 @@ const actions = {
     try { await updateDoc(doc(db, "profiles", el.dataset.uid), { photo: deleteField() }); delete (S.profiles[el.dataset.uid] || {}).photo; render(); toast("Photo removed"); }
     catch (e) { toast("Could not remove the photo."); }
   },
+  statsRange(el) { S.params.range = el.dataset.r; render(); },
   openBuddy(el) { go("buddy", { pid: el.dataset.pid }); },
   async makeInvite() {
     const token = Math.random().toString(36).slice(2, 8) + Math.random().toString(36).slice(2, 8);
