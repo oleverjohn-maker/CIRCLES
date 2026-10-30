@@ -280,6 +280,8 @@ let pendingFriend = (() => {
 function clearFriendInvite() { pendingFriend = null; try { sessionStorage.removeItem("circles-friend"); } catch (e) {} }
 
 function go(view, params = {}) {
+  if (S.rec) actions.recCancel();
+  S.pending = null; S.viewImg = null;
   if (view !== "buddy" && S.chatSub) { S.chatSub(); S.chatSub = null; S.chat = []; }
   S.view = view; S.params = params; S.confirming = null;
   if (view === "buddy") openChat(params.pid);
@@ -757,24 +759,29 @@ const views = {
     const o = otherOf(b), me = S.user.uid, p = S.profiles[o] || {}, sm = b["s_" + o];
     const today = sm && sm.date === T() ? sm.shared || [] : (sm ? (sm.shared || []).map(h => ({ ...h, done: false })) : []);
     const theirName = b["n_" + o], myShared = b["n_" + me];
-    return `<div class="stack-lg">
-      <div class="stack"><button class="back" data-act="nav" data-v="friends">‹ Friends</button>
-        <div class="row">${avatar(p, "lg", b["p_" + o])}<div><h1>${esc(p.nickname || "Buddy")}</h1>${tagsFor(o)}${theirName ? `<p class="small">Real name: <b>${esc(theirName)}</b></p>` : `<p class="small muted">Real name not shared</p>`}${(b["j_" + o] || p.profession) ? `<p class="small">${esc(b["j_" + o] || p.profession)}</p>` : ""}</div></div></div>
-      <section class="stack"><h2>Their habits today</h2>${today.length ? `<div class="chips">${today.map(h => h.type === "build" ? `<span class="chip ${h.done ? "ok" : ""}">${esc(h.name)}${h.done ? " · done" : ""}</span>` : `<span class="chip">${esc(h.name)} · ${h.clean} days clean</span>`).join("")}</div>` : `<p class="small muted">They have not shared any habits.</p>`}
-        <div class="row"><button class="btn small warm" data-act="buddyMsg" data-kind="cheer">Cheer them on</button><button class="btn small ghost" data-act="buddyMsg" data-kind="nudge">Send a nudge</button></div></section>
-      <section class="stack"><h2>Chat</h2>
-        <div class="stack">${S.chat.length ? S.chat.slice().reverse().map(m => chatLine(m, p)).join("") : `<p class="small muted">No messages yet. Say hello.</p>`}</div>
-        <div class="card stack"><textarea id="chatText" maxlength="1000" placeholder="Write a message"></textarea><button class="btn" data-act="buddyMsg" data-kind="text">Send</button></div></section>
-      <section class="stack"><h2>Real names</h2><div class="card stack">
+    const msgs = S.chat.slice().reverse();
+    let lastDay = "";
+    const thread = msgs.map(m => { const t = tsOf(m.createdAt) || Date.now(), d = ds(new Date(t)); const sep = d !== lastDay ? `<div class="daysep"><span>${dayLabel(d)}</span></div>` : ""; lastDay = d; return sep + bubble(m, p); }).join("");
+    return `<div class="chatpage">
+      <div class="chathead"><button class="back" data-act="nav" data-v="friends" aria-label="Back to friends">‹</button>${avatar(p, "", b["p_" + o])}
+        <div style="min-width:0;flex:1"><b>${esc(p.nickname || "Buddy")}</b>${tagsFor(o)}<p class="small muted">${theirName ? esc(theirName) : "Real name not shared"}${(b["j_" + o] || p.profession) ? " · " + esc(b["j_" + o] || p.profession) : ""}</p></div></div>
+      <details class="card buddyinfo"><summary><b>Their habits today</b> <span class="small muted">${today.filter(h => h.done).length} of ${today.length} done · settings</span></summary>
+        <div class="stack" style="margin-top:12px">
+        ${today.length ? `<div class="chips">${today.map(h => h.type === "build" ? `<span class="chip ${h.done ? "ok" : ""}">${esc(h.name)}${h.done ? " · done" : ""}</span>` : `<span class="chip">${esc(h.name)} · ${h.clean} days clean</span>`).join("")}</div>` : `<p class="small muted">They have not shared any habits.</p>`}
+        <div class="row"><button class="btn small warm" data-act="buddyMsg" data-kind="cheer">Cheer them on</button><button class="btn small ghost" data-act="buddyMsg" data-kind="nudge">Send a nudge</button></div>
+        <b style="margin-top:6px">Real names</b>
         ${myShared ? `<p class="small">They can see your real name: <b>${esc(myShared)}</b></p><button class="link" data-act="hideName">Hide my real name from them</button>`
           : (S.confirming === "reveal" ? `<div class="confirm" style="flex-direction:column;align-items:stretch"><b>Share your real name with ${esc(p.nickname)}?</b><span>They will see <b>${esc(S.account.realName || "your name")}</b>${S.account.photo ? ", your profile photo" : ""}${S.account.profession ? " and your profession" : ""}. You can hide it again later, but they may remember it.</span><div class="row"><button class="btn small" data-act="revealName">Yes, share it</button><button class="btn small ghost" data-act="cancel">Cancel</button></div></div>`
           : `<p class="small muted">Your real name is private. Share it only if you want to.</p><button class="btn small ghost" data-act="revealAsk">Share my real name</button>`)}
         ${theirName ? "" : `<button class="link" data-act="buddyMsg" data-kind="reveal-ask">Ask them to share their real name</button>`}
-      </div></section>
-      <section class="stack"><button class="link" data-act="unbuddyAsk">Remove buddy</button>
-        ${S.confirming === "unbuddy" ? `<div class="confirm">Stop being buddies with ${esc(p.nickname)}? Your chat will be closed.<button class="btn small danger" data-act="unbuddy">Remove</button><button class="btn small ghost" data-act="cancel">Keep</button></div>` : ""}</section>
-    </div>${nav()}`;
+        <button class="link" data-act="unbuddyAsk">Remove buddy</button>
+        ${S.confirming === "unbuddy" ? `<div class="confirm">Stop being buddies with ${esc(p.nickname)}? Your chat will be closed.<button class="btn small danger" data-act="unbuddy">Remove</button><button class="btn small ghost" data-act="cancel">Keep</button></div>` : ""}
+        </div></details>
+      <div class="thread" id="thread">${msgs.length ? thread : `<div class="empty" style="margin-top:20px">No messages yet. Say hello to ${esc(p.nickname || "your buddy")}.</div>`}</div>
+      ${composer()}
+    </div>${nav()}${viewerView()}`;
   },
+
 
   admin: () => {
     const list = S.params.list || [];
@@ -836,6 +843,74 @@ function buddyButton(uid) {
   if (S.buddyIn.some(r => r.from === uid)) return `<button class="btn small" data-act="acceptBuddy" data-from="${esc(uid)}">Accept their buddy request</button>`;
   return `<button class="link" data-act="askBuddy" data-uid="${esc(uid)}">Ask to be buddies</button>`;
 }
+const MAX_DATA = 900000; // a message, attachment included, must stay under Firestore's 1 MB limit
+function dayLabel(d) {
+  if (d === T()) return "Today";
+  if (d === ds(addDays(todayDate(), -1))) return "Yesterday";
+  return new Date(d + "T00:00").toLocaleDateString("en-IN", { weekday: "short", day: "numeric", month: "short" });
+}
+const clock = t => new Date(t || Date.now()).toLocaleTimeString("en-IN", { hour: "numeric", minute: "2-digit" });
+const kb = n => n > 1048576 ? (n / 1048576).toFixed(1) + " MB" : Math.max(1, Math.round(n / 1024)) + " KB";
+const mmss = s => Math.floor(s / 60) + ":" + String(Math.floor(s % 60)).padStart(2, "0");
+const safeData = (d, re) => typeof d === "string" && re.test(d) ? d : "";
+function bubble(m, other) {
+  const mine = m.from === S.user.uid, who = mine ? "You" : (other.nickname || "Buddy"), t = clock(tsOf(m.createdAt));
+  if (["cheer", "nudge", "reveal-ask"].includes(m.kind)) {
+    const body = m.kind === "cheer" ? `${esc(who)} ${mine ? "cheered them on" : "cheered you on"}`
+      : m.kind === "nudge" ? `${esc(who)} ${mine ? "sent a gentle nudge" : "sent you a gentle nudge"}`
+      : `${esc(who)} asked ${mine ? "them" : "you"} to share ${mine ? "their" : "your"} real name.${mine ? "" : " Open settings above to choose."}`;
+    return `<div class="sysmsg sys-${m.kind}"><span>${body} · ${t}</span></div>`;
+  }
+  let inner = "";
+  if (m.kind === "image") {
+    const src = safeData(m.data, /^data:image\/(jpeg|png|webp|gif);base64,/);
+    inner = src ? `<button class="imgbtn" data-act="viewImg" data-id="${esc(m.id)}" aria-label="Open photo"><img src="${src}" alt="Photo"></button>` : `<p class="small">Photo could not be shown</p>`;
+  } else if (m.kind === "audio") {
+    const src = safeData(m.data, /^data:audio\/[a-z0-9.+-]+(;[^,]*)?;base64,/i);
+    inner = src ? `<div class="voice"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M12 15a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.9V21h2v-2.1A7 7 0 0 0 19 12z"/></svg><audio controls preload="metadata" src="${src}"></audio><span class="small">${mmss(m.dur || 0)}</span></div>` : `<p class="small">Voice note could not be played</p>`;
+  } else if (m.kind === "file") {
+    const src = safeData(m.data, /^data:[a-z0-9.+\/-]+(;[^,]*)?;base64,/i);
+    inner = `<a class="filecard" ${src ? `href="${src}" download="${esc(m.name || "file")}"` : ""}><svg viewBox="0 0 24 24" width="28" height="28" aria-hidden="true"><path fill="currentColor" d="M6 2h8l6 6v12a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2zm7 1.5V9h5.5z"/></svg><span><b>${esc(m.name || "File")}</b><span class="small">${kb(m.size || 0)} · Tap to open</span></span></a>`;
+  }
+  const text = m.text ? `<p class="post-text">${esc(m.text)}</p>` : "";
+  return `<div class="msg-row ${mine ? "me" : "them"}"><div class="bubble ${m.kind === "image" ? "media" : ""}">${inner}${text}<span class="time">${t}</span></div></div>`;
+}
+function composer() {
+  if (S.rec) return `<div class="composer recording"><button class="iconbtn" data-act="recCancel" aria-label="Delete recording"><svg viewBox="0 0 24 24" width="22" height="22"><path fill="currentColor" d="M9 3h6l1 2h4v2H4V5h4zm-3 6h12l-1 12H7z"/></svg></button>
+    <div class="recinfo"><i class="recdot"></i><span id="recTime">${mmss(S.rec.secs || 0)}</span><span class="small muted">Recording, up to 1 minute</span></div>
+    <button class="sendbtn" data-act="recStop" aria-label="Send voice note"><svg viewBox="0 0 24 24" width="22" height="22"><path fill="currentColor" d="M3 20.5 21 12 3 3.5 3 10l12 2-12 2z"/></svg></button></div>`;
+  const pend = S.pending;
+  return `<div class="composer-wrap">
+    ${pend ? `<div class="pending">${pend.kind === "image" ? `<img src="${pend.data}" alt="Photo to send">` : `<div class="filecard"><svg viewBox="0 0 24 24" width="28" height="28"><path fill="currentColor" d="M6 2h8l6 6v12a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2zm7 1.5V9h5.5z"/></svg><span><b>${esc(pend.name)}</b><span class="small">${kb(pend.size)}</span></span></div>`}
+      <button class="link" data-act="clearPending">Remove</button></div>` : ""}
+    <div class="composer">
+      <label class="iconbtn" for="attachFile" aria-label="Attach a file"><svg viewBox="0 0 24 24" width="22" height="22"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M20 11.5 12.2 19.3a5 5 0 0 1-7-7l8-8a3.3 3.3 0 0 1 4.7 4.7l-8 8a1.7 1.7 0 0 1-2.4-2.4l7.3-7.3"/></svg></label>
+      <input type="file" id="attachFile" data-act="pickAttach" hidden>
+      <label class="iconbtn" for="attachPhoto" aria-label="Send a photo"><svg viewBox="0 0 24 24" width="22" height="22"><path fill="currentColor" d="M9 3 7.2 5H4a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-3.2L15 3zm3 5a5 5 0 1 1 0 10 5 5 0 0 1 0-10zm0 2a3 3 0 1 0 0 6 3 3 0 0 0 0-6z"/></svg></label>
+      <input type="file" id="attachPhoto" accept="image/*" data-act="pickPhotoMsg" hidden>
+      <textarea id="chatText" rows="1" maxlength="1000" placeholder="${pend ? "Add a caption" : "Message"}"></textarea>
+      <button class="sendbtn" id="sendBtn" data-act="${pend ? "sendMsg" : "micOrSend"}" aria-label="${pend ? "Send" : "Send or record a voice note"}">
+        <svg class="ic-send" viewBox="0 0 24 24" width="22" height="22"><path fill="currentColor" d="M3 20.5 21 12 3 3.5 3 10l12 2-12 2z"/></svg>
+        <svg class="ic-mic" viewBox="0 0 24 24" width="22" height="22"><path fill="currentColor" d="M12 15a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.9V21h2v-2.1A7 7 0 0 0 19 12z"/></svg></button>
+    </div></div>`;
+}
+function viewerView() {
+  if (!S.viewImg) return "";
+  return `<div class="overlay" role="dialog" aria-modal="true" aria-label="Photo" data-act="closeImg"><img src="${S.viewImg}" alt="Photo" style="max-width:100%;max-height:85vh;border-radius:12px"><button class="btn ghost" data-act="closeImg" style="position:absolute;top:calc(16px + env(safe-area-inset-top,0px));right:16px;color:#fff;border-color:#fff">Close</button></div>`;
+}
+function syncSendBtn() {
+  const b = document.getElementById("sendBtn"), t = document.getElementById("chatText");
+  if (!b || !t) return;
+  const has = !!t.value.trim() || !!S.pending;
+  b.classList.toggle("has-text", has);
+  t.style.height = "auto"; t.style.height = Math.min(t.scrollHeight, 140) + "px";
+}
+async function sendChat(body) {
+  const pid = S.params.pid;
+  await setDoc(doc(db, "buddies", pid, "messages", "m" + Date.now() + uidShort()), { from: S.user.uid, text: "", createdAt: serverTimestamp(), ...body });
+  await updateDoc(doc(db, "buddies", pid), { ["a_" + S.user.uid]: Date.now(), ["r_" + S.user.uid]: Date.now() });
+}
+function readAsDataUrl(blob) { return new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(blob); }); }
 function chatLine(m, other) {
   const mine = m.from === S.user.uid, who = mine ? "You" : (other.nickname || "Buddy");
   const body = m.kind === "cheer" ? `${esc(who)} ${mine ? "cheered them on" : "cheered you on"}`
@@ -1046,6 +1121,10 @@ function render() {
   if (S.crop) applyCrop();
   Object.entries(drafts).forEach(([id, val]) => { const el = document.getElementById(id); if (el && !el.value) el.value = val; });
   if (keepId) { const el = document.getElementById(keepId); if (el) { if (keepVal !== null && "value" in el) el.value = keepVal; el.focus(); } }
+  if (S.view === "buddy") {
+    syncSendBtn();
+    if (S.chat.length !== render._n || S.params.pid !== render._pid) { render._n = S.chat.length; render._pid = S.params.pid; requestAnimationFrame(() => window.scrollTo(0, document.body.scrollHeight)); }
+  }
 }
 
 /* ---------------- actions ---------------- */
@@ -1380,6 +1459,72 @@ const actions = {
     } catch (e) { console.error(e); toast("Could not accept. Please try again."); }
   },
   async ignoreBuddy(el) { try { await deleteDoc(doc(db, "buddyReqs", S.user.uid + "_" + el.dataset.from)); } catch (e) {} },
+  async micOrSend() {
+    const t = document.getElementById("chatText"), text = (t && t.value || "").trim();
+    if (text) return actions.sendMsg();
+    actions.recStart();
+  },
+  async sendMsg() {
+    const t = document.getElementById("chatText"), text = (t && t.value || "").trim(), pend = S.pending;
+    if (!text && !pend) return;
+    const body = pend ? { kind: pend.kind, data: pend.data, name: pend.name || "", size: pend.size || 0, text } : { kind: "text", text };
+    if (t) t.value = ""; S.pending = null; render();
+    try { await sendChat(body); if (needsCare(text)) toast("If you are struggling, please call Tele MANAS on 14416, free, day and night."); }
+    catch (e) { console.error(e); toast("Could not send. Please check your connection and try again."); }
+  },
+  async pickPhotoMsg(el) {
+    const f = el.files && el.files[0]; el.value = ""; if (!f) return;
+    if (!f.type.startsWith("image/")) return toast("Please choose a photo.");
+    try {
+      let data = await fileToDataUrl(f, 1280);
+      if (data.length > MAX_DATA) data = await fileToDataUrl(f, 900);
+      if (data.length > MAX_DATA) return toast("That photo is too large to send.");
+      S.pending = { kind: "image", data, name: f.name, size: Math.round(data.length * .75) }; render();
+      const t = document.getElementById("chatText"); if (t) t.focus();
+    } catch (e) { toast("That photo could not be used. Please try another."); }
+  },
+  async pickAttach(el) {
+    const f = el.files && el.files[0]; el.value = ""; if (!f) return;
+    if (f.type.startsWith("image/")) return actions.pickPhotoMsg({ files: [f], value: "" });
+    if (f.size > 650000) return toast("Files up to 600 KB can be sent in this test version.");
+    try { const data = await readAsDataUrl(f); S.pending = { kind: "file", data, name: f.name.slice(0, 80), size: f.size }; render(); }
+    catch (e) { toast("That file could not be read."); }
+  },
+  clearPending() { S.pending = null; render(); },
+  async recStart() {
+    if (!navigator.mediaDevices || !window.MediaRecorder) return toast("Voice notes are not supported in this browser. Please use Chrome or Safari.");
+    let stream;
+    try { stream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
+    catch (e) { return toast("Please allow the microphone to record a voice note."); }
+    const types = ["audio/webm;codecs=opus", "audio/mp4", "audio/ogg;codecs=opus", "audio/webm"];
+    const mimeType = types.find(t => MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(t)) || "";
+    const rec = new MediaRecorder(stream, mimeType ? { mimeType, audioBitsPerSecond: 32000 } : undefined);
+    const chunks = [];
+    S.rec = { rec, stream, chunks, secs: 0, start: Date.now(), cancel: false };
+    rec.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
+    rec.onstop = async () => {
+      const r = S.rec; stream.getTracks().forEach(t => t.stop()); clearInterval(r.timer); S.rec = null; render();
+      if (r.cancel) return;
+      const dur = Math.round((Date.now() - r.start) / 1000);
+      if (dur < 1) return toast("Hold on a little longer to record.");
+      try {
+        const data = await readAsDataUrl(new Blob(chunks, { type: rec.mimeType || "audio/webm" }));
+        if (data.length > MAX_DATA) return toast("That voice note is too long to send.");
+        await sendChat({ kind: "audio", data, dur, size: Math.round(data.length * .75) });
+      } catch (e) { console.error(e); toast("Could not send the voice note. Please try again."); }
+    };
+    rec.start();
+    S.rec.timer = setInterval(() => {
+      if (!S.rec) return; S.rec.secs = (Date.now() - S.rec.start) / 1000;
+      const el = document.getElementById("recTime"); if (el) el.textContent = mmss(S.rec.secs);
+      if (S.rec.secs >= 60) actions.recStop();
+    }, 250);
+    render();
+  },
+  recStop() { if (S.rec && S.rec.rec.state !== "inactive") S.rec.rec.stop(); },
+  recCancel() { if (S.rec) { S.rec.cancel = true; if (S.rec.rec.state !== "inactive") S.rec.rec.stop(); } },
+  viewImg(el) { const m = S.chat.find(x => x.id === el.dataset.id); if (m) { S.viewImg = m.data; render(); } },
+  closeImg() { S.viewImg = null; render(); },
   async buddyMsg(el) {
     const pid = S.params.pid, kind = el.dataset.kind;
     let text = "";
@@ -1498,6 +1643,9 @@ document.addEventListener("click", e => {
   if (el.tagName === "LABEL") return;
   e.preventDefault(); a(el);
 });
+document.addEventListener("keydown", e => {
+  if (e.target.id === "chatText" && e.key === "Enter" && !e.shiftKey && !("ontouchstart" in window)) { e.preventDefault(); actions.sendMsg(); }
+});
 let dragging = null;
 document.addEventListener("pointerdown", e => {
   if (!S.crop || !e.target.closest("#cropFrame")) return;
@@ -1507,6 +1655,7 @@ document.addEventListener("pointermove", e => { if (!dragging || !S.crop) return
 document.addEventListener("pointerup", () => { dragging = null; });
 document.addEventListener("pointercancel", () => { dragging = null; });
 document.addEventListener("input", e => {
+  if (e.target.id === "chatText") { syncSendBtn(); return; }
   if (e.target.id === "cropZoom" && S.crop) { S.crop.zoom = Number(e.target.value); applyCrop(); return; }
   if (e.target.id === "peopleFilter") { S.params.pf = e.target.value.trim().toLowerCase(); render(); }
 });

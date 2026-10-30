@@ -178,3 +178,50 @@ input[type=range]{width:100%;accent-color:var(--accent)}
 nav.tabs{background:var(--nav)}
 .logo-mark{border-color:#0297DE}.logo-mark::after{background:#FC734D}
 .tag.lead{background:color-mix(in srgb,var(--accent) 16%,transparent);color:var(--accent)}
+
+/* chat, WhatsApp style */
+.chatpage{display:flex;flex-direction:column;gap:12px;padding-bottom:150px}
+.chathead{position:sticky;top:0;z-index:5;display:flex;align-items:center;gap:10px;background:color-mix(in srgb,var(--bg) 82%,transparent);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);padding:6px 0 10px;border-bottom:1px solid var(--line);margin-top:-6px}
+.chathead .back{font-size:1.8rem;line-height:1;padding:0 6px 4px 0}
+.buddyinfo{padding:12px 14px}
+.buddyinfo summary{cursor:pointer;list-style:none;display:flex;gap:8px;align-items:baseline;flex-wrap:wrap}
+.buddyinfo summary::-webkit-details-marker{display:none}
+.thread{display:flex;flex-direction:column;gap:6px}
+.daysep{display:flex;justify-content:center;margin:10px 0 4px}
+.daysep span{font-size:.72rem;font-weight:700;color:var(--muted);background:var(--soft);padding:3px 10px;border-radius:99px}
+.msg-row{display:flex}
+.msg-row.me{justify-content:flex-end}
+.bubble{max-width:78%;padding:8px 12px 6px;border-radius:18px;position:relative;display:flex;flex-direction:column;gap:4px;overflow-wrap:anywhere}
+.msg-row.them .bubble{background:var(--surface);border:1px solid var(--line);border-bottom-left-radius:6px}
+.msg-row.me .bubble{background:var(--grad);color:#fff;border-bottom-right-radius:6px}
+.bubble .time{font-size:.68rem;opacity:.7;align-self:flex-end;line-height:1}
+.bubble.media{padding:4px 4px 6px}
+.bubble.media .post-text{padding:2px 8px 0}
+.bubble.media .time{padding-right:8px}
+.imgbtn{border:0;padding:0;background:none;cursor:zoom-in;display:block}
+.imgbtn img{display:block;max-width:100%;width:260px;max-height:320px;object-fit:cover;border-radius:14px}
+.voice{display:flex;align-items:center;gap:8px;max-width:100%}
+.voice audio{height:36px;max-width:220px;min-width:0}
+.voice .small{white-space:nowrap}
+.filecard{display:flex;align-items:center;gap:10px;text-decoration:none;color:inherit;padding:6px 4px;min-width:0}
+.filecard>span{display:flex;flex-direction:column;min-width:0}
+.filecard b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:200px}
+.sysmsg{display:flex;justify-content:center}
+.sysmsg span{font-size:.8rem;background:color-mix(in srgb,var(--warm) 14%,transparent);color:var(--ink);padding:5px 12px;border-radius:99px;text-align:center}
+.sysmsg.sys-reveal-ask span{background:color-mix(in srgb,var(--accent) 14%,transparent)}
+.composer-wrap,.composer.recording{position:fixed;left:0;right:0;bottom:calc(64px + env(safe-area-inset-bottom,0px));z-index:9;background:var(--bg);border-top:1px solid var(--line);
+  padding:8px max(12px,env(safe-area-inset-right,0px)) 8px max(12px,env(safe-area-inset-left,0px))}
+.composer-wrap>*{max-width:560px;margin-left:auto;margin-right:auto}
+.composer{display:flex;align-items:flex-end;gap:6px}
+.composer.recording{display:flex;align-items:center;gap:10px}
+.composer textarea{flex:1;min-width:0;min-height:44px;max-height:140px;resize:none;border-radius:22px;padding:11px 16px;line-height:1.35}
+.iconbtn{width:42px;height:44px;display:grid;place-items:center;border-radius:50%;color:var(--muted);cursor:pointer;flex:none;background:none;border:0}
+.iconbtn:hover{color:var(--accent);background:var(--soft)}
+.sendbtn{width:46px;height:46px;border-radius:50%;border:0;background:var(--grad);color:#fff;display:grid;place-items:center;cursor:pointer;flex:none}
+.sendbtn .ic-send{display:none}.sendbtn.has-text .ic-send{display:block}.sendbtn.has-text .ic-mic{display:none}
+.composer.recording .sendbtn .ic-send{display:block}
+.recinfo{flex:1;display:flex;align-items:center;gap:10px;font-variant-numeric:tabular-nums;font-weight:700}
+.recdot{width:12px;height:12px;border-radius:50%;background:#E53935;animation:blink 1s infinite}
+@keyframes blink{50%{opacity:.25}}
+.pending{display:flex;align-items:center;gap:12px;padding:6px 4px 10px}
+.pending img{width:72px;height:72px;object-fit:cover;border-radius:12px}
