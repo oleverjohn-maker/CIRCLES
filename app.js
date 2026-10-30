@@ -60,6 +60,43 @@ const IN_APP = /FBAN|FBAV|FB_IAB|Instagram|WhatsApp|LinkedInApp|Snapchat|Line\/|
 const IS_ANDROID = /Android/i.test(UA), IS_IOS = /iPhone|iPad|iPod/i.test(UA);
 function chromeIntent() { return "intent://" + location.host + location.pathname + location.search + "#Intent;scheme=https;package=com.android.chrome;end"; }
 
+/* ---------------- notifications (while the app is open or in the background) ---------------- */
+const STARTED = Date.now();
+const NOTIF = { seen: new Set(), ready: {} };
+const notifSupported = () => "Notification" in window && "serviceWorker" in navigator;
+const isIOS = /iPhone|iPad|iPod/i.test(navigator.userAgent || "");
+const standalone = () => matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
+function notifPref() { try { return localStorage.getItem("circles-notif") !== "off"; } catch (e) { return true; } }
+function notifState() {
+  if (!notifSupported()) return isIOS && !standalone() ? "ios-home" : "unsupported";
+  if (Notification.permission === "denied") return "denied";
+  if (Notification.permission === "granted") return notifPref() ? "on" : "paused";
+  return "ask";
+}
+// First delivery from each listener only records what already exists, so old items never notify.
+function firstSeen(key, ids) {
+  if (!NOTIF.ready[key]) { ids.forEach(i => NOTIF.seen.add(key + ":" + i)); NOTIF.ready[key] = true; return []; }
+  const fresh = ids.filter(i => !NOTIF.seen.has(key + ":" + i)); fresh.forEach(i => NOTIF.seen.add(key + ":" + i)); return fresh;
+}
+async function notify(title, body, open, tag) {
+  if (document.visibilityState === "visible") { toast(title + (body ? ": " + body : "")); return; }
+  if (notifState() !== "on") return;
+  try {
+    const reg = await navigator.serviceWorker.ready;
+    await reg.showNotification(title, { body, tag: tag || open, renotify: true, icon: "icons/icon-192.png", badge: "icons/icon-192.png", data: { open } });
+  } catch (e) { console.warn("notify", e); }
+}
+function openTarget(open) {
+  if (!open || !S.user) return;
+  const [kind, id] = open.split(":");
+  if (kind === "buddy") go("buddy", { pid: id });
+  else if (kind === "circle") go("circle", { cid: id });
+  else go(kind === "friends" ? "friends" : "today");
+}
+if ("serviceWorker" in navigator) navigator.serviceWorker.addEventListener("message", e => { if (e.data && e.data.open) openTarget(e.data.open); });
+const openParam = new URLSearchParams(location.search).get("open");
+if (openParam) history.replaceState(null, "", location.pathname);
+
 /* ---------------- theme ---------------- */
 function getTheme() { try { const t = localStorage.getItem("circles-theme"); return t === "light" || t === "dark" ? t : "auto"; } catch (e) { return "auto"; } }
 function applyTheme(t) {
@@ -342,6 +379,7 @@ async function startSession(user) {
   if (!S.account.onboarded) return go("ob-privacy");
   if (pendingInvite && !(S.account.circles || []).includes(pendingInvite.c)) return openPromise(pendingInvite.c, pendingInvite.k);
   if (pendingFriend) return openFriendInvite(pendingFriend);
+  if (openParam) return openTarget(openParam);
   go("today");
 }
 
@@ -364,11 +402,20 @@ function watchMine() {
   S.subs.push(onSnapshot(query(collection(db, "buddies"), where("members", "array-contains", uid)), async snap => {
     S.buddies = snap.docs.map(d => ({ id: d.id, ...d.data() }));
     await loadProfiles(S.buddies.map(otherOf));
+    const acts = S.buddies.map(b => b.id + "@" + (b["a_" + otherOf(b)] || 0));
+    firstSeen("msg", acts).forEach(k => {
+      const b = S.buddies.find(x => k.startsWith(x.id + "@")); if (!b || !b["a_" + otherOf(b)]) return;
+      if (S.view === "buddy" && S.params.pid === b.id && document.visibilityState === "visible") return;
+      notify((S.profiles[otherOf(b)] || {}).nickname || "Your buddy", "sent you a message", "buddy:" + b.id, "buddy-" + b.id);
+    });
     if (["today", "friends", "buddy", "circle"].includes(S.view)) render();
   }, () => {}));
   S.subs.push(onSnapshot(query(collection(db, "buddyReqs"), where("to", "==", uid)), async snap => {
     S.buddyIn = snap.docs.map(d => ({ id: d.id, ...d.data() }));
     await loadProfiles(S.buddyIn.map(r => r.from));
+    firstSeen("breq", S.buddyIn.map(r => r.id)).forEach(id => {
+      const r = S.buddyIn.find(x => x.id === id); if (r) notify("New buddy request", ((S.profiles[r.from] || {}).nickname || "Someone") + " wants to be your buddy", "friends", "breq");
+    });
     if (["today", "friends"].includes(S.view)) render();
   }, () => {}));
   S.subs.push(onSnapshot(query(collection(db, "buddyReqs"), where("from", "==", uid)), async snap => {
@@ -400,11 +447,23 @@ function watchCircles() {
     S.circleSubs.push(onSnapshot(query(collection(db, "circles", cid, "posts"), orderBy("createdAt", "desc"), limit(60)), async s => {
       S.circles[cid].posts = s.docs.map(d => ({ id: d.id, ...d.data({ serverTimestamps: "estimate" }) }));
       await loadProfiles(S.circles[cid].posts.map(p => p.uid));
+      firstSeen("post-" + cid, S.circles[cid].posts.map(p => p.id)).forEach(id => {
+        const p = S.circles[cid].posts.find(x => x.id === id); if (!p || p.uid === S.user.uid || p.hidden) return;
+        if (S.view === "circle" && S.params.cid === cid && document.visibilityState === "visible") return;
+        const who = (S.profiles[p.uid] || {}).nickname || "Someone", cname = S.circles[cid].name || "your Circle";
+        const what = p.kind === "badge" ? who + " earned a badge" : p.kind === "checkin" ? who + " checked in" : who + " posted";
+        notify(cname, what, "circle:" + cid, "post-" + cid);
+      });
       renderIfCircle(cid);
     }, () => {}));
     S.circleSubs.push(onSnapshot(query(collection(db, "circles", cid, "nudges"), where("to", "==", S.user.uid)), async s => {
       S.nudges = S.nudges.filter(n => n.cid !== cid).concat(s.docs.map(d => ({ id: d.id, cid, ...d.data({ serverTimestamps: "estimate" }) })));
       await loadProfiles(S.nudges.map(n => n.from));
+      firstSeen("nudge-" + cid, s.docs.map(d => d.id)).forEach(id => {
+        const n = S.nudges.find(x => x.id === id); if (!n) return;
+        const who = (S.profiles[n.from] || {}).nickname || "Someone";
+        notify(n.kind === "cheer" ? who + " is cheering you on" : who + " sent you a gentle nudge", n.kind === "cheer" ? "Keep going today." : "Time to check in on Circles.", "today", "nudge");
+      });
       if (S.view === "today") render();
     }, () => {}));
   });
@@ -590,6 +649,7 @@ const views = {
         <div class="row" style="flex-wrap:nowrap"><div class="bar" style="flex:1"><i style="width:${builds.length ? done / builds.length * 100 : 0}%"></i></div><b>${done} of ${builds.length}</b></div><p class="small muted">${builds.length ? (done === builds.length ? "Everything done for today. Well done." : "habits kept today") : "Add a habit to get started"}</p></div>
       ${nudges.length ? `<div class="inbox">${nudges.slice(0, 5).map(n => `<div class="note">${avatar(S.profiles[n.from], "sm")}<div><b>${esc((S.profiles[n.from] || {}).nickname || "Someone")}</b> ${n.kind === "cheer" ? "is cheering you on" : "sent you a gentle nudge"}<p class="small muted">${ago(tsOf(n.createdAt))}</p></div><button class="link" data-act="dismissNudge" data-cid="${esc(n.cid)}" data-id="${esc(n.id)}" aria-label="Dismiss">Dismiss</button></div>`).join("")}</div>` : ""}
       ${S.buddyIn.length || S.buddies.some(unread) ? `<div class="inbox">${S.buddyIn.map(r => `<div class="note">${avatar(S.profiles[r.from], "sm")}<div><b>${esc((S.profiles[r.from] || {}).nickname || "Someone")}</b> wants to be your buddy</div><button class="btn small" data-act="nav" data-v="friends">See</button></div>`).join("")}${S.buddies.filter(unread).map(b => `<div class="note">${avatar(S.profiles[otherOf(b)], "sm")}<div><b>${esc((S.profiles[otherOf(b)] || {}).nickname || "Your buddy")}</b> sent you a message</div><button class="btn small" data-act="openBuddy" data-pid="${esc(b.id)}">Open</button></div>`).join("")}</div>` : ""}
+      ${notifState() === "ask" && !S.ob.notifLater ? `<div class="care-card" style="border-color:var(--accent);background:color-mix(in srgb,var(--accent) 8%,var(--surface))"><b>Turn on notifications?</b><p class="small">Get told when a buddy messages you, someone cheers or nudges you, or your Circle posts.</p><div class="row"><button class="btn small" data-act="notifOn">Turn on</button><button class="link" data-act="notifLater">Not now</button></div></div>` : ""}
       ${moodCard()}
       <section class="stack"><h2>Today's habits</h2>${hs.length ? hs.map(habitCard).join("") : `<div class="empty">You have no habits yet.<button class="btn small" data-act="nav" data-v="me">Add a habit</button></div>`}</section>
       ${hs.length ? `<section class="stack"><h2>Your week so far</h2><button class="card circle-card" data-act="nav" data-v="stats">
@@ -669,6 +729,7 @@ const views = {
           <div class="choices"><label class="choice"><input type="radio" name="newT" value="build" checked><b>Build</b><small>Tick it off each day</small></label><label class="choice"><input type="radio" name="newT" value="quit"><b>Quit</b><small>Count days clean</small></label></div>
           <label class="row small"><input type="checkbox" id="newShare" checked> Let my Circles see this habit</label>
           <button class="btn" data-act="addHabit">Add habit</button></div></section>
+      <section class="stack"><h2>Notifications</h2>${notifCard()}</section>
       <section class="stack"><h2>Theme</h2><div class="themes" role="radiogroup" aria-label="Theme">
         ${[["auto", "Automatic", "#F2F7FA", "#02070A"], ["light", "Light", "#F2F7FA", "#FFFFFF"], ["dark", "Dark", "#02070A", "#0A1822"]].map(([k, l, a, b]) => `<button class="${getTheme() === k ? "on" : ""}" data-act="setTheme" data-t="${k}" role="radio" aria-checked="${getTheme() === k}"><span class="sw"><i style="background:${a}"></i><i style="background:${b}"></i></span>${l}</button>`).join("")}
       </div><p class="small muted">Automatic follows your phone's light or dark setting.</p></section>
@@ -979,6 +1040,18 @@ async function saveJournalEntry(part) {
     const oldM = e && e.mood, newM = part.mood;
     if (newM && newM !== oldM) { bump(dayDoc(), "moods." + newM); if (oldM) bump(dayDoc(), "moods." + oldM, -1); }
   } catch (err) { console.error(err); toast("Could not save. Please try again."); }
+}
+function notifCard() {
+  const st = notifState();
+  const msg = {
+    on: `<p><b>Notifications are on.</b></p><p class="small muted">You will be told about new messages, cheers, nudges, buddy requests and Circle posts while Circles is open or running in the background. In this test version they stop once your phone fully closes the app.</p><div class="row"><button class="btn small ghost" data-act="notifTest">Send a test notification</button><button class="link" data-act="notifPause">Turn off</button></div>`,
+    paused: `<p><b>Notifications are off.</b></p><button class="btn small" data-act="notifResume">Turn on</button>`,
+    ask: `<p class="small muted">Get told when a buddy messages you, someone cheers or nudges you, or your Circle posts.</p><button class="btn small" data-act="notifOn">Turn on notifications</button>`,
+    denied: `<p><b>Notifications are blocked for Circles.</b></p><p class="small muted">To allow them, open your browser settings, find Site settings or Notifications, and allow this site. Then come back here.</p>`,
+    "ios-home": `<p><b>On iPhone, add Circles to your Home Screen first.</b></p><p class="small muted">In Safari, tap the Share button, then Add to Home Screen. Open Circles from its new icon and turn notifications on here.</p>`,
+    unsupported: `<p class="small muted">This browser cannot show notifications. Please open Circles in Chrome or Safari.</p>`,
+  }[st];
+  return `<div class="card stack">${msg}</div>`;
 }
 function moodCard() {
   const e = S.journal.find(x => x.id === T());
@@ -1474,6 +1547,18 @@ const actions = {
     } catch (e) { console.error(e); toast("Could not accept. Please try again."); }
   },
   async ignoreBuddy(el) { try { await deleteDoc(doc(db, "buddyReqs", S.user.uid + "_" + el.dataset.from)); } catch (e) {} },
+  async notifOn() {
+    if (!notifSupported()) return render();
+    try { const r = await Notification.requestPermission(); try { localStorage.removeItem("circles-notif"); } catch (e) {} if (r === "granted") toast("Notifications are on"); } catch (e) {}
+    render();
+  },
+  notifLater() { S.ob.notifLater = true; render(); },
+  notifPause() { try { localStorage.setItem("circles-notif", "off"); } catch (e) {} render(); },
+  notifResume() { try { localStorage.removeItem("circles-notif"); } catch (e) {} render(); },
+  async notifTest() {
+    try { const reg = await navigator.serviceWorker.ready; await reg.showNotification("Circles", { body: "Notifications are working. Keep going today.", icon: "icons/icon-192.png", badge: "icons/icon-192.png", data: { open: "today" }, tag: "test" }); }
+    catch (e) { toast("Could not show a notification on this phone."); }
+  },
   setTheme(el) { const t = el.dataset.t; try { if (t === "auto") localStorage.removeItem("circles-theme"); else localStorage.setItem("circles-theme", t); } catch (e) {} applyTheme(t); render(); },
   async micOrSend() {
     const t = document.getElementById("chatText"), text = (t && t.value || "").trim();
