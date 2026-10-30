@@ -20,7 +20,7 @@ const addDays = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); r
 const daysBetween = (a, b) => Math.round((new Date(b + "T00:00") - new Date(a + "T00:00")) / 864e5);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const uidShort = () => Math.random().toString(36).slice(2, 10);
-const COLORS = ["#0E6B5A", "#2F6FB0", "#7A4BB5", "#B5541F", "#C2416B", "#3E7D2E", "#8A6A12", "#4F5B66"];
+const COLORS = ["#0285C4", "#2F6FB0", "#7A4BB5", "#B5541F", "#C2416B", "#3E7D2E", "#8A6A12", "#4F5B66"];
 const tickSvg = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>';
 const CARE_WORDS = ["suicide", "kill myself", "end my life", "want to die", "self harm", "self-harm", "hurt myself", "cut myself", "no reason to live"];
 const needsCare = t => CARE_WORDS.some(w => t.toLowerCase().includes(w));
