@@ -60,6 +60,18 @@ const IN_APP = /FBAN|FBAV|FB_IAB|Instagram|WhatsApp|LinkedInApp|Snapchat|Line\/|
 const IS_ANDROID = /Android/i.test(UA), IS_IOS = /iPhone|iPad|iPod/i.test(UA);
 function chromeIntent() { return "intent://" + location.host + location.pathname + location.search + "#Intent;scheme=https;package=com.android.chrome;end"; }
 
+/* ---------------- theme ---------------- */
+function getTheme() { try { const t = localStorage.getItem("circles-theme"); return t === "light" || t === "dark" ? t : "auto"; } catch (e) { return "auto"; } }
+function applyTheme(t) {
+  const r = document.documentElement;
+  if (t === "light" || t === "dark") r.setAttribute("data-theme", t); else r.removeAttribute("data-theme");
+  const dark = t === "dark" || (t === "auto" && matchMedia("(prefers-color-scheme: dark)").matches);
+  document.querySelectorAll('meta[name="theme-color"]').forEach(m => m.remove());
+  const m = document.createElement("meta"); m.name = "theme-color"; m.content = dark ? "#02070A" : "#F2F7FA"; document.head.appendChild(m);
+}
+applyTheme(getTheme());
+matchMedia("(prefers-color-scheme: dark)").addEventListener?.("change", () => { if (getTheme() === "auto") applyTheme("auto"); });
+
 /* ---------------- habit maths ---------------- */
 function streak(h) {
   const log = h.log || {}; let d = log[T()] ? todayDate() : addDays(todayDate(), -1), n = 0;
@@ -657,6 +669,9 @@ const views = {
           <div class="choices"><label class="choice"><input type="radio" name="newT" value="build" checked><b>Build</b><small>Tick it off each day</small></label><label class="choice"><input type="radio" name="newT" value="quit"><b>Quit</b><small>Count days clean</small></label></div>
           <label class="row small"><input type="checkbox" id="newShare" checked> Let my Circles see this habit</label>
           <button class="btn" data-act="addHabit">Add habit</button></div></section>
+      <section class="stack"><h2>Theme</h2><div class="themes" role="radiogroup" aria-label="Theme">
+        ${[["auto", "Automatic", "#F2F7FA", "#02070A"], ["light", "Light", "#F2F7FA", "#FFFFFF"], ["dark", "Dark", "#02070A", "#0A1822"]].map(([k, l, a, b]) => `<button class="${getTheme() === k ? "on" : ""}" data-act="setTheme" data-t="${k}" role="radio" aria-checked="${getTheme() === k}"><span class="sw"><i style="background:${a}"></i><i style="background:${b}"></i></span>${l}</button>`).join("")}
+      </div><p class="small muted">Automatic follows your phone's light or dark setting.</p></section>
       <section class="stack"><h2>Daily reminder</h2><div class="card stack">
         <p class="small muted">Pick a time and add a daily reminder to your phone's calendar, so you never forget to check in.</p>
         <div class="field"><label for="remTime">Remind me every day at</label><input type="time" id="remTime" value="${esc(S.ob.remTime || "20:00")}"></div>
@@ -1459,6 +1474,7 @@ const actions = {
     } catch (e) { console.error(e); toast("Could not accept. Please try again."); }
   },
   async ignoreBuddy(el) { try { await deleteDoc(doc(db, "buddyReqs", S.user.uid + "_" + el.dataset.from)); } catch (e) {} },
+  setTheme(el) { const t = el.dataset.t; try { if (t === "auto") localStorage.removeItem("circles-theme"); else localStorage.setItem("circles-theme", t); } catch (e) {} applyTheme(t); render(); },
   async micOrSend() {
     const t = document.getElementById("chatText"), text = (t && t.value || "").trim();
     if (text) return actions.sendMsg();

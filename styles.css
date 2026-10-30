@@ -10,12 +10,18 @@
   --body:"Figtree","Segoe UI",system-ui,sans-serif;
   color-scheme:light;
 }
-@media (prefers-color-scheme: dark){:root{
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
   --bg:#02070A; --surface:#0A1822; --ink:#EEF6FB; --muted:#8FA6B5; --line:#16303F; --soft:#0F2230;
   --accent:#0297DE; --accent-ink:#FFFFFF; --done:#0297DE; --quit:#FC734D; --warm:#FC734D; --danger:#F2867E;
   --glow:linear-gradient(180deg,#05324C 0px,#03131D 260px,#02070A 520px);
   --nav:#02070A;
   color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#02070A; --surface:#0A1822; --ink:#EEF6FB; --muted:#8FA6B5; --line:#16303F; --soft:#0F2230;
+  --accent:#0297DE; --accent-ink:#FFFFFF; --done:#0297DE; --quit:#FC734D; --warm:#FC734D; --danger:#F2867E;
+  --glow:linear-gradient(180deg,#05324C 0px,#03131D 260px,#02070A 520px);
+  --nav:#02070A;
+  color-scheme:dark}
 *{box-sizing:border-box}
 html,body{margin:0}
 body{background:var(--glow),var(--bg);background-attachment:fixed;color:var(--ink);font-family:var(--body);font-size:16px;line-height:1.5;-webkit-font-smoothing:antialiased}
@@ -225,3 +231,10 @@ nav.tabs{background:var(--nav)}
 @keyframes blink{50%{opacity:.25}}
 .pending{display:flex;align-items:center;gap:12px;padding:6px 4px 10px}
 .pending img{width:72px;height:72px;object-fit:cover;border-radius:12px}
+
+/* theme picker */
+.themes{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.themes button{display:flex;flex-direction:column;align-items:center;gap:6px;padding:12px 6px;border-radius:14px;border:1.5px solid var(--line);background:var(--surface);cursor:pointer;font-weight:600;font-size:.88rem;color:var(--ink)}
+.themes button.on{border-color:var(--accent);background:color-mix(in srgb,var(--accent) 10%,var(--surface))}
+.themes .sw{width:44px;height:30px;border-radius:8px;border:1px solid var(--line);overflow:hidden;display:flex}
+.themes .sw i{flex:1}
