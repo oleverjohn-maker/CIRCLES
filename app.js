@@ -663,9 +663,10 @@ const views = {
           <button class="btn" data-act="checkin">${checked ? "Update check in" : "Share my check in"}</button>
           <div id="careSlot"></div></div></section>` : ""}
       <section class="stack"><h2>Your Circles</h2>${myCircles.length ? myCircles.map(c => {
-        const ms = c.members || [], ci = ms.filter(m => m.lastCheckIn === T()).length;
+        const ms = c.members || [], ci = ms.filter(m => goalDone(c, m)).length, mine = goalDone(c, ms.find(m => m.uid === S.user.uid) || {});
         const pt = planToday(c);
-        return `<button class="card circle-card" data-act="openCircle" data-cid="${esc(c.id)}"><b>${esc(c.name || "Circle")}</b><span class="small muted">${ci} of ${ms.length} checked in today</span>${pt && pt.ref ? `<span class="small">Today's reading: <b>${esc(pt.ref)}</b></span>` : ""}</button>`;
+        return `<div class="card stack" style="gap:10px"><button class="circle-card" style="background:none;border:0;padding:0;color:inherit" data-act="openCircle" data-cid="${esc(c.id)}"><b>${esc(c.name || "Circle")}</b>${c.goal ? `<span class="small">Goal: ${esc(c.goal)}</span>` : ""}<span class="small muted">${ci} of ${ms.length} done today</span>${pt && pt.ref ? `<span class="small">Today's reading: <b>${esc(pt.ref)}</b></span>` : ""}</button>
+          ${mine ? `<span class="small" style="color:var(--done);font-weight:700">✓ You did it today</span>` : `<button class="btn small" data-act="goalToggle" data-cid="${esc(c.id)}">Yes, I did it today</button>`}</div>`;
       }).join("") : `<div class="empty">You have not joined a Circle yet.<button class="btn small" data-act="nav" data-v="circles">Find a Circle</button></div>`}</section>
     </div>${nav()}`;
   },
@@ -683,7 +684,7 @@ const views = {
     const c = S.circles[S.params.cid];
     if (!c) return `<div class="empty">This Circle could not be found.</div>${nav()}`;
     const me = S.user.uid, isLead = c.leaderUid === me || S.isAdmin;
-    const ms = (c.members || []).slice().sort((a, b) => (b.lastCheckIn === T()) - (a.lastCheckIn === T()));
+    const ms = (c.members || []).slice().sort((a, b) => goalDone(c, b) - goalDone(c, a));
     const posts = (c.posts || []).filter(p => !p.hidden || isLead);
     const sel = S.params.member;
     const selM = sel && ms.find(m => m.uid === sel);
@@ -691,9 +692,10 @@ const views = {
       <div class="stack"><button class="back" data-act="nav" data-v="circles">‹ Circles</button>
         <h1>${esc(c.name || "Circle")}</h1>${c.goal ? `<p class="muted">${esc(c.goal)}</p>` : ""}
         ${c.leaderUid ? `<p class="small muted">Led by <b>${esc((S.profiles[c.leaderUid] || {}).nickname || "the Circle leader")}</b></p>` : ""}</div>
+      ${goalSection(c, ms)}
       ${planSection(c, ms, isLead)}
-      <section class="stack"><div class="row" style="justify-content:space-between"><h2>Members</h2><span class="small muted">${ms.filter(m => m.lastCheckIn === T()).length} of ${ms.length} checked in today</span></div>
-        <div class="members">${ms.map(m => `<button class="member" data-act="pickMember" data-uid="${esc(m.uid)}">${avatar(S.profiles[m.uid]).replace('class="av ', `class="av ${m.lastCheckIn === T() ? "done" : ""} `)}<span>${esc((S.profiles[m.uid] || {}).nickname || "Member")}${m.uid === me ? " (you)" : ""}</span></button>`).join("")}</div>
+      <section class="stack"><div class="row" style="justify-content:space-between"><h2>Members</h2><span class="small muted">A blue dot means done today</span></div>
+        <div class="members">${ms.map(m => `<button class="member" data-act="pickMember" data-uid="${esc(m.uid)}">${avatar(S.profiles[m.uid]).replace('class="av ', `class="av ${goalDone(c, m) ? "done" : ""} `)}<span>${esc((S.profiles[m.uid] || {}).nickname || "Member")}${m.uid === me ? " (you)" : ""}</span></button>`).join("")}</div>
         ${selM ? memberPanel(c, selM, isLead) : ""}</section>
       ${c.leaderUid === me && (ms.find(m => m.uid === me) || {}).code ? invitePanel(ms.find(m => m.uid === me).code, c.id) : ""}
       <section class="stack"><h2>Write to your Circle</h2>
@@ -995,6 +997,24 @@ function chatLine(m, other) {
     : esc(m.text);
   return `<div class="note" style="${mine ? "border-left-color:var(--accent)" : ""}"><div><b>${esc(who)}</b><p class="post-text">${body}</p><p class="small muted">${ago(tsOf(m.createdAt))}</p></div></div>`;
 }
+const goalDone = (c, m) => !!((m.goal || {})[T()] || (planToday(c) && planToday(c).ref && (m.read || {})[T()]));
+function goalSection(c, ms) {
+  const me = ms.find(m => m.uid === S.user.uid) || {}, mine = goalDone(c, me);
+  const done = ms.filter(m => goalDone(c, m)), notYet = ms.filter(m => !goalDone(c, m));
+  const pct = ms.length ? Math.round(done.length / ms.length * 100) : 0;
+  const person = m => `<div class="row" style="flex-wrap:nowrap;gap:10px">${avatar(S.profiles[m.uid], "sm")}<span style="min-width:0;flex:1">${esc((S.profiles[m.uid] || {}).nickname || "Member")}${m.uid === S.user.uid ? " (you)" : ""}</span></div>`;
+  return `<section class="stack"><h2>Today's goal</h2><div class="card stack goalcard ${mine ? "is-done" : ""}">
+    <p class="label">${esc(c.name || "Circle")} goal</p>
+    <h3>${esc(c.goal || "Keep today's Circle goal")}</h3>
+    ${mine
+      ? `<div class="goal-yes"><span class="tickcircle">${tickSvg}</span><div><b>You did it today</b><p class="small muted">Your Circle can see you are done.</p></div></div><button class="link" data-act="goalToggle">Undo</button>`
+      : `<p class="small muted">Did you do it today? Tap the button so your Circle knows.</p><button class="btn block" data-act="goalToggle">Yes, I did it today</button>`}
+    <div class="row" style="flex-wrap:nowrap"><div class="bar" style="flex:1"><i style="width:${pct}%"></i></div><b class="small">${done.length} of ${ms.length} done</b></div>
+    <div class="goalcols">
+      <div><p class="label" style="color:var(--done)">Done today · ${done.length}</p><div class="stack" style="gap:8px">${done.length ? done.map(person).join("") : `<p class="small muted">Nobody yet. Be the first.</p>`}</div></div>
+      <div><p class="label">Not yet · ${notYet.length}</p><div class="stack" style="gap:8px">${notYet.length ? notYet.map(person).join("") : `<p class="small" style="color:var(--done)">Everyone is done today!</p>`}</div></div>
+    </div></div></section>`;
+}
 function planSection(c, ms, isLead) {
   const pt = planToday(c), myM = ms.find(m => m.uid === S.user.uid) || {};
   const picker = isLead ? `<div class="field"><label for="planPick" class="small">${pt ? "Change the reading plan" : "Add a Bible reading plan for this Circle"}</label><div class="row" style="flex-wrap:nowrap"><select id="planPick">${Object.entries(PLANS).map(([k, p]) => `<option value="${k}" ${c.planId === k ? "selected" : ""}>${p.name}</option>`).join("")}</select><button class="btn small" data-act="setPlan">Start today</button></div></div>` : "";
@@ -1176,7 +1196,7 @@ function habitCard(h) {
 function memberPanel(c, m, isLead) {
   const p = S.profiles[m.uid] || {}, me = m.uid === S.user.uid;
   const sum = (m.summary && m.summary.date === T()) ? m.summary.shared || [] : (m.summary ? (m.summary.shared || []).map(h => ({ ...h, done: false })) : []);
-  return `<div class="card stack"><div class="row">${avatar(p)}<div><b>${esc(p.nickname || "Member")}</b>${tagsFor(m.uid, c)}${p.profession ? `<p class="small">${esc(p.profession)}</p>` : ""}<p class="small muted">${m.lastCheckIn === T() ? "Checked in today" : "Not checked in yet today"}</p></div></div>
+  return `<div class="card stack"><div class="row">${avatar(p)}<div><b>${esc(p.nickname || "Member")}</b>${tagsFor(m.uid, c)}${p.profession ? `<p class="small">${esc(p.profession)}</p>` : ""}<p class="small ${goalDone(c, m) ? "" : "muted"}" style="${goalDone(c, m) ? "color:var(--done);font-weight:700" : ""}">${goalDone(c, m) ? "✓ Did the Circle goal today" : "Has not done the Circle goal yet today"}</p></div></div>
     ${sum.length ? `<div class="chips">${sum.map(h => h.type === "build" ? `<span class="chip ${h.done ? "ok" : ""}">${esc(h.name)}${h.done ? " · done" : ""}</span>` : `<span class="chip">${esc(h.name)} · ${h.clean} days clean</span>`).join("")}</div>` : `<p class="small muted">No shared habits.</p>`}
     ${me ? "" : `<div class="row"><button class="btn small warm" data-act="nudge" data-kind="cheer" data-uid="${esc(m.uid)}">Cheer them on</button><button class="btn small ghost" data-act="nudge" data-kind="nudge" data-uid="${esc(m.uid)}">Send a nudge</button></div>${buddyButton(m.uid)}`}
     ${isLead && !me ? `<div class="row">${S.isAdmin && c.leaderUid !== m.uid ? `<button class="link" data-act="makeLeader" data-uid="${esc(m.uid)}">Make leader</button>` : ""}<button class="link" data-act="removeAsk" data-uid="${esc(m.uid)}">Remove from Circle</button></div>
@@ -1651,6 +1671,14 @@ const actions = {
   async setPlan() {
     const planId = document.getElementById("planPick").value;
     try { await updateDoc(doc(db, "circles", S.params.cid), { planId, planStart: T() }); toast("Reading plan started"); } catch (e) { console.error(e); toast("Could not set the plan."); }
+  },
+  async goalToggle(el) {
+    const cid = (el && el.dataset.cid) || S.params.cid, c = S.circles[cid]; if (!c) return;
+    const my = (c.members || []).find(m => m.uid === S.user.uid) || {}, on = !!(my.goal || {})[T()];
+    try {
+      await updateDoc(doc(db, "circles", cid, "members", S.user.uid), { ["goal." + T()]: on ? deleteField() : true, active: serverTimestamp() });
+      if (!on) { toast("Well done. Your Circle can see you did it."); bump(dayDoc(), "goals"); }
+    } catch (e) { console.error(e); toast("Could not save. Please try again."); }
   },
   async markRead() {
     const c = S.circles[S.params.cid], my = (c.members || []).find(m => m.uid === S.user.uid) || {}, on = !!(my.read || {})[T()];
